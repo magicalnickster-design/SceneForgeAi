@@ -156,25 +156,55 @@ async function openGeneratorDialog() {
 function wireAutoDetectUi(dialogHtml) {
   const form = dialogHtml.find(".sceneforge-form");
   const autoDetectButton = dialogHtml.find(".sceneforge-autodetect-btn");
+  const useDetectedToggle = form.find('[name="useDetectedSettings"]');
+
+  // Run once on initial render so the preview is immediately useful.
+  refreshDetectionPreview(dialogHtml);
 
   autoDetectButton.on("click", () => {
-    const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
-    if (!prompt) {
+    const detected = refreshDetectionPreview(dialogHtml);
+    if (!detected) {
       ui.notifications.warn("SceneForge AI: Enter a prompt before auto-detecting.");
-      return;
     }
-
-    const detected = parsePromptForSceneSettings(prompt);
-
-    // Apply suggested options into dropdowns so the user can accept or tweak.
-    form.find('[name="theme"]').val(detected.theme);
-    form.find('[name="sceneSize"]').val(detected.suggestedSize);
-
-    // Save detected payload for Generate.
-    form.data("sceneforgeDetected", detected);
-
-    renderDetectedResults(dialogHtml, detected);
   });
+
+  // If the user toggles ON after already detecting, sync manual controls again.
+  useDetectedToggle.on("change", () => {
+    const detected = form.data("sceneforgeDetected");
+    if (!detected) return;
+    if (useDetectedToggle.is(":checked")) {
+      applyDetectedSettingsToControls(form, detected);
+    }
+  });
+}
+
+/**
+ * Parse prompt, store detected payload, render preview, and optionally
+ * apply detected settings to manual controls if toggle is enabled.
+ */
+function refreshDetectionPreview(dialogHtml) {
+  const form = dialogHtml.find(".sceneforge-form");
+  const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
+  if (!prompt) return null;
+
+  const detected = parsePromptForSceneSettings(prompt);
+  form.data("sceneforgeDetected", detected);
+
+  if (form.find('[name="useDetectedSettings"]').is(":checked")) {
+    applyDetectedSettingsToControls(form, detected);
+  }
+
+  renderDetectedResults(dialogHtml, detected);
+  return detected;
+}
+
+/**
+ * Synchronize manual dropdowns to currently detected values.
+ */
+function applyDetectedSettingsToControls(form, detected) {
+  form.find('[name="theme"]').val(detected.theme);
+  form.find('[name="sceneSize"]').val(detected.suggestedSize);
+  form.find('[name="lightingMood"]').val(detected.lightingMood);
 }
 
 /**
@@ -185,6 +215,8 @@ async function handleGenerate(dialogHtml) {
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
   let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
+  let lightingMood = String(form.find('[name="lightingMood"]').val() ?? "dim");
+  const useDetectedSettings = form.find('[name="useDetectedSettings"]').is(":checked");
 
   // If user leaves seed blank, we create one now and persist it in scene flags.
   const seedInput = String(form.find('[name="seed"]').val() ?? "").trim();
@@ -198,9 +230,14 @@ async function handleGenerate(dialogHtml) {
   // Parse from current prompt during Generate so data always matches latest text.
   const detected = parsePromptForSceneSettings(prompt);
 
-  // Keep selected dropdown values authoritative (user can override suggestions).
-  theme = theme || detected.theme;
-  sceneSizeKey = sceneSizeKey || detected.suggestedSize;
+  if (useDetectedSettings) {
+    // Requirement: when ON, detected settings override manual choices.
+    theme = detected.theme;
+    sceneSizeKey = detected.suggestedSize;
+    lightingMood = detected.lightingMood;
+  }
+
+  const effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
@@ -210,10 +247,12 @@ async function handleGenerate(dialogHtml) {
     prompt,
     sceneSizeKey,
     theme,
-    lightingMood: detected.lightingMood,
+    lightingMood,
     detected,
+    useDetectedSettings,
+    effectiveDetected,
     seed,
-    moduleVersion: "0.3.0"
+    moduleVersion: "0.4.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -259,11 +298,18 @@ async function handleGenerate(dialogHtml) {
  * Render detected values in the dialog so users can review before generating.
  */
 function renderDetectedResults(dialogHtml, detected) {
+  const form = dialogHtml.find(".sceneforge-form");
   const content = dialogHtml.find(".sceneforge-detected-content");
+  const matchedKeywords = detected.matchedKeywords ?? { theme: [], lighting: [], features: [] };
   const enabledFeatures = FEATURE_KEYS.filter((key) => detected.features[key]);
   const featureListHtml = enabledFeatures.length > 0
     ? enabledFeatures.map((key) => `<li>${foundry.utils.escapeHTML(formatFeatureLabel(key, detected.features))}</li>`).join("")
     : "<li>No specific feature keywords detected.</li>";
+
+  const highlightedPrompt = buildPromptHighlightHtml(String(form.find('[name="prompt"]').val() ?? ""), matchedKeywords);
+  const themeDebug = formatMatchedKeywordList(matchedKeywords.theme);
+  const lightingDebug = formatMatchedKeywordList(matchedKeywords.lighting);
+  const featureDebug = formatMatchedKeywordList(matchedKeywords.features);
 
   content.html(`
     <p><strong>Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(detected.theme))}</p>
@@ -271,7 +317,122 @@ function renderDetectedResults(dialogHtml, detected) {
     <p><strong>Suggested Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(detected.suggestedSize))}</p>
     <p><strong>Detected Features:</strong></p>
     <ul>${featureListHtml}</ul>
+    <p><strong>Keyword Highlights:</strong></p>
+    <div class="sceneforge-highlight-preview">${highlightedPrompt}</div>
+    <div class="sceneforge-debug-lines">
+      <p><strong>Theme:</strong> ${foundry.utils.escapeHTML(themeDebug)}</p>
+      <p><strong>Lighting:</strong> ${foundry.utils.escapeHTML(lightingDebug)}</p>
+      <p><strong>Features:</strong> ${foundry.utils.escapeHTML(featureDebug)}</p>
+    </div>
   `);
+}
+
+/**
+ * Build a detection payload with features disabled.
+ * Used when "Use Detected Settings" is OFF.
+ */
+function buildDisabledDetectedPayload(detected) {
+  const disabledFeatures = {
+    sideRoomsCount: detected?.features?.sideRoomsCount ?? 2
+  };
+  for (const key of FEATURE_KEYS) {
+    disabledFeatures[key] = false;
+  }
+
+  return {
+    ...detected,
+    features: disabledFeatures
+  };
+}
+
+/**
+ * Format a comma-separated keyword list for debug lines.
+ */
+function formatMatchedKeywordList(keywords) {
+  if (!keywords || keywords.length === 0) return "none";
+  return keywords.join(", ");
+}
+
+/**
+ * Remove duplicate keyword strings while preserving original order.
+ */
+function dedupeKeywords(keywords) {
+  const seen = new Set();
+  const result = [];
+  for (const keyword of keywords) {
+    const normalized = String(keyword ?? "").trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(keyword);
+  }
+  return result;
+}
+
+/**
+ * Highlight matched keyword text in the original prompt preview.
+ * Uses separate classes for theme / lighting / feature categories.
+ */
+function buildPromptHighlightHtml(prompt, matchedKeywords) {
+  if (!prompt) return '<span class="notes">No prompt entered.</span>';
+
+  const ranges = [
+    ...buildKeywordRanges(prompt, matchedKeywords?.theme ?? [], "sceneforge-hl-theme"),
+    ...buildKeywordRanges(prompt, matchedKeywords?.lighting ?? [], "sceneforge-hl-lighting"),
+    ...buildKeywordRanges(prompt, matchedKeywords?.features ?? [], "sceneforge-hl-feature")
+  ];
+
+  // Sort ranges and drop overlaps to keep resulting HTML predictable.
+  ranges.sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    return b.end - a.end;
+  });
+
+  const nonOverlapping = [];
+  let cursor = -1;
+  for (const range of ranges) {
+    if (range.start < cursor) continue;
+    nonOverlapping.push(range);
+    cursor = range.end;
+  }
+
+  if (nonOverlapping.length === 0) {
+    return foundry.utils.escapeHTML(prompt);
+  }
+
+  let result = "";
+  let index = 0;
+  for (const range of nonOverlapping) {
+    result += foundry.utils.escapeHTML(prompt.slice(index, range.start));
+    const matchedText = foundry.utils.escapeHTML(prompt.slice(range.start, range.end));
+    result += `<span class="${range.className}">${matchedText}</span>`;
+    index = range.end;
+  }
+  result += foundry.utils.escapeHTML(prompt.slice(index));
+  return result;
+}
+
+/**
+ * Find all case-insensitive ranges for each keyword inside prompt text.
+ */
+function buildKeywordRanges(prompt, keywords, className) {
+  const textLower = prompt.toLowerCase();
+  const ranges = [];
+
+  for (const rawKeyword of keywords) {
+    const keyword = String(rawKeyword ?? "").trim().toLowerCase();
+    if (!keyword) continue;
+
+    let searchIndex = 0;
+    while (searchIndex < textLower.length) {
+      const start = textLower.indexOf(keyword, searchIndex);
+      if (start === -1) break;
+      const end = start + keyword.length;
+      ranges.push({ start, end, className });
+      searchIndex = end;
+    }
+  }
+
+  return ranges;
 }
 
 /**
@@ -311,6 +472,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const lightingMood = String(generationData.lightingMood ?? "dim");
   const seed = String(generationData.seed ?? randomSeedString());
   const detected = generationData.detected ?? parsePromptForSceneSettings(prompt);
+  const useDetectedSettings = generationData.useDetectedSettings !== false;
+  const effectiveDetected = generationData.effectiveDetected ?? (useDetectedSettings ? detected : buildDisabledDetectedPayload(detected));
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
@@ -333,8 +496,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   // Same seed + same options => same pseudo-random sequence => same layout.
   const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
 
-  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected);
-  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, detected);
+  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
+  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   if (walls.length > 0) {
     await scene.createEmbeddedDocuments("Wall", walls);
@@ -344,7 +507,16 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await scene.createEmbeddedDocuments("AmbientLight", lights);
   }
 
-  const summaryText = buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration);
+  const summaryText = buildPromptSummary(
+    prompt,
+    sceneSizeKey,
+    theme,
+    seed,
+    lightingMood,
+    effectiveDetected,
+    isRegeneration,
+    useDetectedSettings
+  );
   const journal = await JournalEntry.create({
     name: `SceneForge Notes - ${scene.name}`,
     pages: [
@@ -387,7 +559,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ];
 
     // Feature influence: add a treasure note marker when treasure is requested.
-    if (detected.features.treasure) {
+    if (effectiveDetected.features.treasure) {
       notesToCreate.push({
         x: Math.floor(widthPx * 0.8),
         y: Math.floor(heightPx * 0.25),
@@ -415,8 +587,10 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     theme,
     lightingMood,
     detected,
+    useDetectedSettings,
+    effectiveDetected,
     seed,
-    moduleVersion: "0.3.0",
+    moduleVersion: "0.4.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -841,7 +1015,7 @@ function formatThemeLabel(theme) {
 /**
  * Build beginner-friendly note text showing the exact saved generation data.
  */
-function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration) {
+function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration, useDetectedSettings) {
   const sceneSizeLabel = {
     small: "Small (30x30)",
     medium: "Medium (50x50)",
@@ -858,6 +1032,7 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 <p><strong>Scene Size:</strong> ${sceneSizeLabel}</p>
 <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[lightingMood] ?? "Dim")}</p>
 <p><strong>Detected Features:</strong> ${foundry.utils.escapeHTML(featureSummary.join(", ") || "None")}</p>
+<p><strong>Use Detected Settings:</strong> ${useDetectedSettings ? "Enabled" : "Disabled"}</p>
 <p><strong>Seed:</strong> ${foundry.utils.escapeHTML(seed)}</p>
 <p><strong>Generation Mode:</strong> ${isRegeneration ? "Regenerated from scene flags" : "Initial generation"}</p>
 <p>This layout is deterministic and local-only. No external AI API calls are used.</p>
@@ -870,44 +1045,75 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
  */
 function parsePromptForSceneSettings(prompt) {
   const text = prompt.toLowerCase();
-  const has = (keywords) => keywords.some((k) => text.includes(k));
-  const countHits = (keywords) => keywords.reduce((sum, k) => sum + (text.includes(k) ? 1 : 0), 0);
+  const matchKeywords = (keywords) => keywords.filter((k) => text.includes(k));
+  const hasAny = (keywords) => matchKeywords(keywords).length > 0;
 
-  // Theme scoring lets multiple clues compete.
-  const themeScores = {
-    tavern: countHits(["tavern", "inn", "bar", "pub", "alehouse"]),
-    cave: countHits(["cave", "cavern", "grotto", "underground", "tunnel"]),
-    "forest-ruins": countHits(["forest", "ruins", "ruined", "temple", "overgrown", "jungle"]),
-    dungeon: countHits(["dungeon", "crypt", "catacomb", "cells", "prison", "fortress"])
+  const themeRules = {
+    tavern: ["tavern", "inn", "bar", "pub", "alehouse"],
+    cave: ["cave", "cavern", "grotto", "underground", "tunnel"],
+    "forest-ruins": ["forest", "ruins", "ruined", "forest temple", "temple", "overgrown", "jungle"],
+    dungeon: ["dungeon", "crypt", "catacomb", "cells", "prison", "fortress"]
   };
+
+  const themeMatches = {};
+  const themeScores = {};
+  for (const [themeKey, keywords] of Object.entries(themeRules)) {
+    const matched = matchKeywords(keywords);
+    themeMatches[themeKey] = matched;
+    themeScores[themeKey] = matched.length;
+  }
 
   const sortedThemes = Object.entries(themeScores).sort((a, b) => b[1] - a[1]);
   const bestTheme = sortedThemes[0]?.[1] > 0 ? sortedThemes[0][0] : "dungeon";
 
+  const lightingRules = {
+    magical: ["magical", "arcane", "rune", "runes", "glowing sigil", "sigil"],
+    night: ["night", "moonlit", "midnight"],
+    dark: ["dark", "pitch black", "gloom"],
+    bright: ["bright", "sunlit", "well lit"],
+    dim: ["dim", "low light", "shadowy"]
+  };
+
   let lightingMood = "dim";
-  if (has(["magical", "arcane", "rune", "runes", "glowing sigil", "sigil"])) lightingMood = "magical";
-  else if (has(["night", "moonlit", "midnight"])) lightingMood = "night";
-  else if (has(["dark", "pitch black", "gloom"])) lightingMood = "dark";
-  else if (has(["bright", "sunlit", "well lit"])) lightingMood = "bright";
-  else if (has(["dim", "low light", "shadowy"])) lightingMood = "dim";
+  let matchedLightingKeywords = [];
+  for (const mood of ["magical", "night", "dark", "bright", "dim"]) {
+    const matched = matchKeywords(lightingRules[mood]);
+    if (matched.length > 0) {
+      lightingMood = mood;
+      matchedLightingKeywords = matched;
+      break;
+    }
+  }
 
   const sideRoomsCount = detectCountFromPrompt(text, ["side room", "side rooms"], 2);
 
-  const features = {
-    bossRoom: has(["boss room", "boss chamber", "final chamber", "throne room"]),
-    sideRooms: has(["side room", "side rooms", "wing", "wings"]),
-    sideRoomsCount,
-    storageRoom: has(["storage", "storeroom", "supply room", "pantry"]),
-    altar: has(["altar", "shrine", "sacrificial"]),
-    pillars: has(["pillar", "pillars", "columns", "column"]),
-    hiddenRoom: has(["hidden room", "secret room", "secret chamber", "hidden chamber"]),
-    treasure: has(["treasure", "loot", "hoard", "chest", "vault"]),
-    water: has(["water", "pool", "river", "stream", "flooded"]),
-    traps: has(["trap", "traps", "spike", "pitfall", "tripwire"]),
-    campfire: has(["campfire", "bonfire", "fire pit"]),
-    bar: has(["bar", "counter", "taproom"]),
-    cells: has(["cells", "cell block", "prison cell", "jail"])
+  const featureRules = {
+    bossRoom: ["boss room", "boss chamber", "final chamber", "throne room"],
+    sideRooms: ["side room", "side rooms", "wing", "wings"],
+    storageRoom: ["storage", "storeroom", "supply room", "pantry"],
+    altar: ["altar", "shrine", "sacrificial"],
+    pillars: ["pillar", "pillars", "columns", "column"],
+    hiddenRoom: ["hidden room", "secret room", "secret chamber", "hidden chamber"],
+    treasure: ["treasure", "loot", "hoard", "chest", "vault"],
+    water: ["water", "pool", "river", "stream", "flooded"],
+    traps: ["trap", "traps", "spike", "pitfall", "tripwire"],
+    campfire: ["campfire", "bonfire", "fire pit"],
+    bar: ["bar", "counter", "taproom"],
+    cells: ["cells", "cell block", "prison cell", "jail"]
   };
+
+  const featureMatchedKeywords = [];
+  const features = { sideRoomsCount };
+  for (const key of FEATURE_KEYS) {
+    const matched = matchKeywords(featureRules[key] ?? []);
+    features[key] = matched.length > 0;
+    if (matched.length > 0) {
+      featureMatchedKeywords.push(...matched);
+    }
+  }
+
+  // Keep useful implications for common natural prompts.
+  if (hasAny(["forest temple", "boss room", "boss chamber"])) features.bossRoom = true;
 
   const enabledFeatureCount = FEATURE_KEYS.reduce((sum, key) => sum + (features[key] ? 1 : 0), 0);
   let suggestedSize = "medium";
@@ -919,7 +1125,12 @@ function parsePromptForSceneSettings(prompt) {
     lightingMood,
     features,
     suggestedSize,
-    featureCount: enabledFeatureCount
+    featureCount: enabledFeatureCount,
+    matchedKeywords: {
+      theme: dedupeKeywords(themeMatches[bestTheme] ?? []),
+      lighting: dedupeKeywords(matchedLightingKeywords),
+      features: dedupeKeywords(featureMatchedKeywords)
+    }
   };
 }
 
@@ -970,14 +1181,15 @@ function detectCountFromPrompt(text, phrases, fallback) {
   };
 
   for (const phrase of phrases) {
-    const numericRegex = new RegExp(`(\\d+)\\s+${phrase.replace(" ", "\\s+")}`);
+    const phraseRegex = phrase.replace(/\s+/g, "\\s+");
+    const numericRegex = new RegExp(`(\\d+)\\s+${phraseRegex}`);
     const numericMatch = text.match(numericRegex);
     if (numericMatch) {
       return Math.max(1, Number(numericMatch[1]));
     }
 
     for (const [word, value] of Object.entries(numberWords)) {
-      const wordRegex = new RegExp(`${word}\\s+${phrase.replace(" ", "\\s+")}`);
+      const wordRegex = new RegExp(`${word}\\s+${phraseRegex}`);
       if (wordRegex.test(text)) return value;
     }
   }
