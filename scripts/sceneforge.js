@@ -58,6 +58,55 @@ const FEATURE_KEYS = [
   "cells"
 ];
 
+/**
+ * Placeholder asset registry for theme-based tile generation.
+ * We use string paths now so later you can swap these to premium pack paths.
+ *
+ * Notes:
+ * - key names are normalized theme keys
+ * - layer controls generation ordering (floor -> prop)
+ * - rarity controls spawn chance uniqueness
+ * - count is a [min, max] range for how many attempts to place
+ * - placement hints drive intelligent placement logic
+ */
+const ASSET_REGISTRY = {
+  tavern: [
+    { id: "table", src: "/assets/tavern/table.png", width: 180, height: 120, layer: "prop", rarity: "common", count: [3, 6], placement: "room" },
+    { id: "chair", src: "/assets/tavern/chair.png", width: 70, height: 70, layer: "prop", rarity: "common", count: [6, 12], placement: "room" },
+    { id: "bar-counter", src: "/assets/tavern/bar-counter.png", width: 320, height: 110, layer: "prop", rarity: "common", count: [1, 1], placement: "wall-near" },
+    { id: "fireplace", src: "/assets/tavern/fireplace.png", width: 170, height: 120, layer: "prop", rarity: "common", count: [1, 1], placement: "wall-near" },
+    { id: "rug", src: "/assets/tavern/rug.png", width: 240, height: 160, layer: "floor", rarity: "common", count: [1, 2], placement: "room" },
+    { id: "barrel", src: "/assets/tavern/barrel.png", width: 85, height: 85, layer: "prop", rarity: "common", count: [4, 8], placement: "room" },
+    { id: "bed-upstairs", src: "/assets/tavern/bed.png", width: 190, height: 120, layer: "prop", rarity: "common", count: [2, 4], placement: "upstairs" }
+  ],
+  cave: [
+    { id: "rock", src: "/assets/cave/rock.png", width: 140, height: 120, layer: "floor", rarity: "common", count: [8, 16], placement: "random" },
+    { id: "stalagmite", src: "/assets/cave/stalagmite.png", width: 110, height: 130, layer: "prop", rarity: "common", count: [6, 12], placement: "random" },
+    { id: "mushroom", src: "/assets/cave/mushroom.png", width: 80, height: 70, layer: "prop", rarity: "common", count: [4, 9], placement: "random" },
+    { id: "bones", src: "/assets/cave/bones.png", width: 100, height: 70, layer: "prop", rarity: "common", count: [3, 7], placement: "random" },
+    { id: "water-pool", src: "/assets/cave/water-pool.png", width: 220, height: 170, layer: "floor", rarity: "common", count: [1, 3], placement: "room" },
+    { id: "crystal", src: "/assets/cave/crystal.png", width: 120, height: 140, layer: "prop", rarity: "rare", count: [1, 2], placement: "room" }
+  ],
+  forestRuins: [
+    { id: "broken-pillar", src: "/assets/forest-ruins/broken-pillar.png", width: 100, height: 120, layer: "prop", rarity: "common", count: [5, 10], placement: "room" },
+    { id: "statue", src: "/assets/forest-ruins/statue.png", width: 130, height: 190, layer: "prop", rarity: "rare", count: [1, 2], placement: "room" },
+    { id: "vines", src: "/assets/forest-ruins/vines.png", width: 180, height: 140, layer: "floor", rarity: "common", count: [3, 7], placement: "wall-near" },
+    { id: "rubble", src: "/assets/forest-ruins/rubble.png", width: 120, height: 90, layer: "floor", rarity: "common", count: [8, 14], placement: "random" },
+    { id: "altar", src: "/assets/forest-ruins/altar.png", width: 260, height: 160, layer: "prop", rarity: "common", count: [1, 1], placement: "center" },
+    { id: "tree", src: "/assets/forest-ruins/tree.png", width: 180, height: 240, layer: "prop", rarity: "common", count: [3, 6], placement: "wall-near" },
+    { id: "stone-debris", src: "/assets/forest-ruins/stone-debris.png", width: 100, height: 80, layer: "floor", rarity: "common", count: [8, 14], placement: "random" }
+  ],
+  dungeon: [
+    { id: "crate", src: "/assets/dungeon/crate.png", width: 100, height: 100, layer: "prop", rarity: "common", count: [4, 8], placement: "room" },
+    { id: "prison-cell", src: "/assets/dungeon/prison-cell.png", width: 220, height: 200, layer: "prop", rarity: "common", count: [1, 3], placement: "wall-near" },
+    { id: "chains", src: "/assets/dungeon/chains.png", width: 70, height: 140, layer: "prop", rarity: "common", count: [3, 8], placement: "wall-near" },
+    { id: "torture-table", src: "/assets/dungeon/torture-table.png", width: 240, height: 130, layer: "prop", rarity: "rare", count: [1, 1], placement: "room" },
+    { id: "bookshelf", src: "/assets/dungeon/bookshelf.png", width: 170, height: 80, layer: "prop", rarity: "common", count: [2, 5], placement: "wall-near" },
+    { id: "broken-wall", src: "/assets/dungeon/broken-wall.png", width: 180, height: 120, layer: "floor", rarity: "common", count: [3, 6], placement: "random" },
+    { id: "torch-prop", src: "/assets/dungeon/torch.png", width: 50, height: 90, layer: "prop", rarity: "common", count: [4, 8], placement: "wall-near" }
+  ]
+};
+
 Hooks.once("init", () => {
   console.log(`${MODULE_ID} | Initializing SceneForge AI module`);
 });
@@ -252,7 +301,7 @@ async function handleGenerate(dialogHtml) {
     useDetectedSettings,
     effectiveDetected,
     seed,
-    moduleVersion: "0.4.0"
+    moduleVersion: "0.5.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -497,10 +546,25 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
 
   const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
+  const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
+  // Generation layers order (premium-style pipeline):
+  // 1) walls
+  // 2) floor assets
+  // 3) props
+  // 4) lighting
+  // 5) notes
   if (walls.length > 0) {
     await scene.createEmbeddedDocuments("Wall", walls);
+  }
+
+  if (tileLayers.floorTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", tileLayers.floorTiles);
+  }
+
+  if (tileLayers.propTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", tileLayers.propTiles);
   }
 
   if (lights.length > 0) {
@@ -589,8 +653,9 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     detected,
     useDetectedSettings,
     effectiveDetected,
+    generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.4.0",
+    moduleVersion: "0.5.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -615,6 +680,13 @@ async function clearGeneratedContent(scene) {
     .map((doc) => doc.id);
   if (lightIds.length > 0) {
     await scene.deleteEmbeddedDocuments("AmbientLight", lightIds);
+  }
+
+  const tileIds = scene.tiles
+    .filter((doc) => doc.getFlag(MODULE_ID, FLAG_GENERATED_KEY) === true)
+    .map((doc) => doc.id);
+  if (tileIds.length > 0) {
+    await scene.deleteEmbeddedDocuments("Tile", tileIds);
   }
 
   const noteIds = scene.notes
@@ -882,6 +954,282 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected) {
   }
 
   return walls;
+}
+
+/**
+ * Build floor + prop tiles using modular registry rules.
+ * This is intentionally data-driven so future premium packs can swap sources.
+ */
+function buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, detected) {
+  const registryThemeKey = normalizeThemeToRegistryKey(theme);
+  const assetEntries = ASSET_REGISTRY[registryThemeKey] ?? [];
+  const contexts = buildPlacementContexts(registryThemeKey, widthPx, heightPx);
+  const occupied = [];
+  const floorTiles = [];
+  const propTiles = [];
+
+  for (const asset of assetEntries) {
+    // Rarity controls uniqueness: rare assets only appear occasionally.
+    if (!shouldSpawnAsset(asset, rng, detected)) continue;
+
+    const countMin = asset.count?.[0] ?? 1;
+    const countMax = asset.count?.[1] ?? countMin;
+    const targetCount = randomInt(rng, countMin, countMax);
+
+    let createdForAsset = 0;
+    const maxAttempts = Math.max(8, targetCount * 10);
+    for (let attempt = 0; attempt < maxAttempts && createdForAsset < targetCount; attempt += 1) {
+      const candidate = getPlacementCandidate(asset, contexts, widthPx, heightPx, rng, detected);
+      if (!candidate) continue;
+
+      const rect = {
+        x: candidate.x,
+        y: candidate.y,
+        w: asset.width,
+        h: asset.height
+      };
+
+      // Collision rule 1: no asset overlap with already placed assets.
+      if (!isRectPlacementValid(rect, occupied, 12)) continue;
+
+      // Collision rule 2: avoid wall overlap unless this is explicitly a wall-near item.
+      const allowNearWalls = asset.placement === "wall-near";
+      if (!allowNearWalls && rectOverlapsWalls(rect, walls, 8)) continue;
+
+      occupied.push(rect);
+      const tileData = buildTileDataFromAsset(asset, candidate.x, candidate.y, rng, seed);
+      if (asset.layer === "floor") floorTiles.push(tileData);
+      else propTiles.push(tileData);
+      createdForAsset += 1;
+    }
+  }
+
+  return { floorTiles, propTiles };
+}
+
+/**
+ * Converts a requested theme key into the asset registry key naming style.
+ */
+function normalizeThemeToRegistryKey(theme) {
+  if (theme === "forest-ruins") return "forestRuins";
+  return theme;
+}
+
+/**
+ * Spawn chance rules by rarity plus feature hints.
+ */
+function shouldSpawnAsset(asset, rng, detected) {
+  if (asset.rarity === "rare") {
+    // Requirement: rare assets are about 10% chance.
+    return rng() <= 0.1;
+  }
+
+  // Common assets are likely, but not guaranteed, to keep output varied.
+  let baseChance = 0.82;
+
+  // Feature-aware boosts for relevant assets.
+  if (asset.id.includes("altar") && detected?.features?.altar) baseChance = 1;
+  if (asset.id.includes("broken-pillar") && detected?.features?.pillars) baseChance = 1;
+  if (asset.id.includes("prison-cell") && detected?.features?.cells) baseChance = 1;
+  if (asset.id.includes("bar-counter") && detected?.features?.bar) baseChance = 1;
+  if (asset.id.includes("water-pool") && detected?.features?.water) baseChance = 1;
+
+  return rng() <= baseChance;
+}
+
+/**
+ * Prepare high-level placement zones for each theme.
+ * These zones are used so beds go in room-like spaces, altars center, etc.
+ */
+function buildPlacementContexts(themeKey, widthPx, heightPx) {
+  const margin = 220;
+  const cx = Math.floor(widthPx / 2);
+  const cy = Math.floor(heightPx / 2);
+  const defaultRoom = {
+    x1: margin,
+    y1: margin,
+    x2: widthPx - margin,
+    y2: heightPx - margin
+  };
+
+  const base = {
+    center: { x: cx, y: cy },
+    rooms: [defaultRoom],
+    upstairs: [
+      {
+        x1: margin + 80,
+        y1: margin,
+        x2: widthPx - margin - 80,
+        y2: cy - 140
+      }
+    ],
+    wallBands: {
+      top: { x1: margin, y1: 80, x2: widthPx - margin, y2: 220 },
+      bottom: { x1: margin, y1: heightPx - 220, x2: widthPx - margin, y2: heightPx - 80 },
+      left: { x1: 80, y1: margin, x2: 220, y2: heightPx - margin },
+      right: { x1: widthPx - 220, y1: margin, x2: widthPx - 80, y2: heightPx - margin }
+    }
+  };
+
+  if (themeKey === "tavern") {
+    base.rooms = [
+      { x1: margin + 40, y1: margin + 60, x2: widthPx - margin - 40, y2: heightPx - margin - 80 }
+    ];
+  } else if (themeKey === "cave") {
+    base.rooms = [
+      { x1: margin, y1: margin, x2: cx + 120, y2: cy + 80 },
+      { x1: cx - 180, y1: cy - 130, x2: widthPx - margin, y2: heightPx - margin }
+    ];
+  } else if (themeKey === "forestRuins") {
+    base.rooms = [
+      { x1: cx - 820, y1: cy - 580, x2: cx + 820, y2: cy + 580 }
+    ];
+  } else if (themeKey === "dungeon") {
+    base.rooms = [
+      { x1: cx - 480, y1: cy - 360, x2: cx + 480, y2: cy + 360 },
+      { x1: margin + 60, y1: cy - 520, x2: margin + 520, y2: cy - 180 },
+      { x1: widthPx - margin - 520, y1: cy + 180, x2: widthPx - margin - 60, y2: cy + 520 }
+    ];
+  }
+
+  return base;
+}
+
+/**
+ * Decide candidate tile coordinates for one asset using placement hints.
+ */
+function getPlacementCandidate(asset, contexts, widthPx, heightPx, rng, detected) {
+  const w = asset.width;
+  const h = asset.height;
+  const placement = asset.placement ?? "random";
+
+  // Center placement supports important landmarks like altar/boss area.
+  if (placement === "center") {
+    return {
+      x: Math.round(contexts.center.x - w / 2),
+      y: Math.round(contexts.center.y - h / 2)
+    };
+  }
+
+  if (placement === "upstairs" && contexts.upstairs.length > 0) {
+    const zone = contexts.upstairs[randomInt(rng, 0, contexts.upstairs.length - 1)];
+    return randomPositionInZone(zone, w, h, rng);
+  }
+
+  if (placement === "room" && contexts.rooms.length > 0) {
+    // If prompt asks side rooms, bias some assets into non-primary room zones.
+    const prefersSideRoom = detected?.features?.sideRooms && contexts.rooms.length > 1;
+    const roomIndex = prefersSideRoom
+      ? randomInt(rng, 0, contexts.rooms.length - 1)
+      : 0;
+    const zone = contexts.rooms[Math.min(roomIndex, contexts.rooms.length - 1)];
+    return randomPositionInZone(zone, w, h, rng);
+  }
+
+  if (placement === "wall-near") {
+    return positionNearWallBand(contexts.wallBands, w, h, rng);
+  }
+
+  // Default random placement avoids outer map edge margins.
+  const margin = 120;
+  return {
+    x: randomInt(rng, margin, Math.max(margin, widthPx - margin - w)),
+    y: randomInt(rng, margin, Math.max(margin, heightPx - margin - h))
+  };
+}
+
+/**
+ * Random position in a rectangular zone with asset-size clamping.
+ */
+function randomPositionInZone(zone, width, height, rng) {
+  const minX = Math.round(zone.x1);
+  const maxX = Math.round(Math.max(zone.x1, zone.x2 - width));
+  const minY = Math.round(zone.y1);
+  const maxY = Math.round(Math.max(zone.y1, zone.y2 - height));
+  return {
+    x: randomInt(rng, minX, maxX),
+    y: randomInt(rng, minY, maxY)
+  };
+}
+
+/**
+ * Chooses a position near one of the wall-adjacent bands.
+ * Great for torches, shelves, chains, etc.
+ */
+function positionNearWallBand(wallBands, width, height, rng) {
+  const sides = ["top", "bottom", "left", "right"];
+  const side = sides[randomInt(rng, 0, sides.length - 1)];
+  return randomPositionInZone(wallBands[side], width, height, rng);
+}
+
+/**
+ * Convert asset definition into Foundry v12 tile data.
+ */
+function buildTileDataFromAsset(asset, x, y, rng, seed) {
+  const rotationByPlacement = asset.placement === "random" ? randomInt(rng, 0, 3) * 90 : 0;
+
+  return {
+    x,
+    y,
+    width: asset.width,
+    height: asset.height,
+    rotation: rotationByPlacement,
+    sort: asset.layer === "floor" ? 0 : 10,
+    texture: {
+      src: asset.src,
+      scaleX: 1,
+      scaleY: 1
+    },
+    flags: {
+      [MODULE_ID]: {
+        [FLAG_GENERATED_KEY]: true,
+        kind: "tile",
+        layer: asset.layer,
+        assetId: asset.id,
+        assetPath: asset.src,
+        seed
+      }
+    }
+  };
+}
+
+/**
+ * True when a candidate rectangle is collision-free against prior placements.
+ */
+function isRectPlacementValid(candidate, occupied, padding = 0) {
+  return !occupied.some((other) => rectsOverlap(candidate, other, padding));
+}
+
+/**
+ * Axis-aligned rectangle intersection test with optional spacing padding.
+ */
+function rectsOverlap(a, b, padding = 0) {
+  return !(
+    a.x + a.w + padding <= b.x
+    || b.x + b.w + padding <= a.x
+    || a.y + a.h + padding <= b.y
+    || b.y + b.h + padding <= a.y
+  );
+}
+
+/**
+ * Checks whether a tile rectangle intersects any generated wall segment bbox.
+ */
+function rectOverlapsWalls(rect, walls, wallPadding = 0) {
+  for (const wall of walls) {
+    const c = wall?.c;
+    if (!Array.isArray(c) || c.length !== 4) continue;
+
+    const wx1 = Math.min(c[0], c[2]) - wallPadding;
+    const wx2 = Math.max(c[0], c[2]) + wallPadding;
+    const wy1 = Math.min(c[1], c[3]) - wallPadding;
+    const wy2 = Math.max(c[1], c[3]) + wallPadding;
+    const wallRect = { x: wx1, y: wy1, w: wx2 - wx1, h: wy2 - wy1 };
+
+    if (rectsOverlap(rect, wallRect, 0)) return true;
+  }
+
+  return false;
 }
 
 /**
