@@ -34,6 +34,96 @@ function debugPayload(label, payload) {
   console.log(`${MODULE_ID} | ${label} payload:`, payload);
 }
 
+function isHttpUrl(value) {
+  return typeof value === "string" && /^https?:\/\//i.test(value);
+}
+
+function isDataUrl(value) {
+  return typeof value === "string" && value.startsWith("data:");
+}
+
+async function ensureDataDirectory(path) {
+  if (!path || typeof FilePicker?.createDirectory !== "function") return;
+  const parts = String(path).split("/").filter((part) => part.length > 0);
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    try {
+      await FilePicker.createDirectory("data", current);
+    } catch (_error) {
+      // Ignore if directory already exists or cannot be created.
+    }
+  }
+}
+
+function inferImageExtension(inputPath, mimeType = "") {
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("svg")) return "svg";
+  if (mime.includes("png")) return "png";
+
+  const path = String(inputPath ?? "");
+  const match = path.match(/\.([a-z0-9]{2,5})(?:$|\?)/i);
+  if (match) return match[1].toLowerCase();
+  return "png";
+}
+
+function dataUrlToBlob(dataUrl) {
+  const match = String(dataUrl ?? "").match(/^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i);
+  if (!match) throw new Error("Invalid data URL.");
+  const mimeType = match[1] || "image/png";
+  const isBase64 = Boolean(match[2]);
+  const dataSegment = match[3] || "";
+  if (isBase64) {
+    const binary = atob(dataSegment);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mimeType });
+  }
+  return new Blob([decodeURIComponent(dataSegment)], { type: mimeType });
+}
+
+async function persistSceneBackgroundPath(imagePath, options = {}) {
+  if (typeof imagePath !== "string" || imagePath.trim().length === 0) return imagePath;
+  const trimmedPath = imagePath.trim();
+
+  // Already local/relative module path; no persistence needed.
+  if (!isHttpUrl(trimmedPath) && !isDataUrl(trimmedPath)) return trimmedPath;
+  if (typeof FilePicker?.upload !== "function" || typeof File !== "function") return trimmedPath;
+
+  const { seed = "map", provider = "ai" } = options;
+  const targetDir = `${MODULE_ID}/generated-maps`;
+  await ensureDataDirectory(targetDir);
+
+  try {
+    let blob;
+    if (isDataUrl(trimmedPath)) {
+      blob = dataUrlToBlob(trimmedPath);
+    } else {
+      const response = await fetch(trimmedPath, { method: "GET", cache: "no-store" });
+      if (!response.ok) throw new Error(`Background fetch failed (${response.status}).`);
+      blob = await response.blob();
+    }
+
+    const extension = inferImageExtension(trimmedPath, blob.type);
+    const safeProvider = String(provider ?? "ai").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+    const safeSeed = String(seed ?? "map").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+    const filename = `map-${safeProvider}-${safeSeed}-${Date.now()}.${extension}`;
+    const file = new File([blob], filename, { type: blob.type || "image/png" });
+    const uploadResult = await FilePicker.upload("data", targetDir, file, {}, { notify: false });
+    const uploadedPath = uploadResult?.path ?? uploadResult?.files?.[0] ?? null;
+    if (uploadedPath) return uploadedPath;
+  } catch (error) {
+    debugLog("Background persistence skipped; using original path", error?.message ?? error);
+  }
+
+  return trimmedPath;
+}
+
 // Defensive constant fallbacks to avoid runtime failures across minor API differences.
 const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
@@ -758,7 +848,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.16.0"
+    moduleVersion: "0.16.1"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1052,7 +1142,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
   const sceneName = `${sceneNamePrefix} - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   try {
-    const resolvedGenerationData = imageGenerationMetadata
+    let resolvedGenerationData = imageGenerationMetadata
       ? { ...generationData, imageGeneration: imageGenerationMetadata }
       : generationData;
 
@@ -1080,15 +1170,34 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (!scene) throw new Error("Scene creation returned no scene document.");
 
     if (backgroundPath) {
+      debugLog("Scene background imagePath received", backgroundPath);
+      const persistedBackgroundPath = await persistSceneBackgroundPath(backgroundPath, {
+        seed: resolvedGenerationData.seed,
+        provider: imageGenerationMetadata?.provider ?? "ai"
+      });
+      debugLog("Scene background path resolved", persistedBackgroundPath);
+
+      if (imageGenerationMetadata && persistedBackgroundPath && imageGenerationMetadata.imagePath !== persistedBackgroundPath) {
+        const updatedImageGenerationMetadata = {
+          ...imageGenerationMetadata,
+          imagePath: persistedBackgroundPath
+        };
+        resolvedGenerationData = {
+          ...resolvedGenerationData,
+          imageGeneration: updatedImageGenerationMetadata
+        };
+      }
+
       await scene.update({
         background: {
-          src: backgroundPath
+          src: persistedBackgroundPath
         }
       });
+      ui.notifications.info("SceneForge AI: Map image applied as scene background.");
     }
 
-    if (imageGenerationMetadata) {
-      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, imageGenerationMetadata);
+    if (resolvedGenerationData.imageGeneration) {
+      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, resolvedGenerationData.imageGeneration);
     }
 
     await generateSceneLayout(scene, resolvedGenerationData);
@@ -1298,6 +1407,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
     const imagePath = first?.b64_json
       ? `data:image/png;base64,${first.b64_json}`
       : (first?.url ?? null);
+    debugLog("OpenAI imagePath received", imagePath);
 
     if (!imagePath) {
       throw new Error("OpenAI response did not include an image payload.");
@@ -1667,7 +1777,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.16.0",
+    version: generationData.moduleVersion ?? "0.16.1",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-planner",
@@ -1810,7 +1920,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.16.0"
+    moduleVersion: "0.16.1"
   };
 
   return {
@@ -2126,7 +2236,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers,
     seed,
-    moduleVersion: "0.16.0",
+    moduleVersion: "0.16.1",
     lastGeneratedAt: Date.now()
   });
 
