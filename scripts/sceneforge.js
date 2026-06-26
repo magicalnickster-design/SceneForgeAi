@@ -578,12 +578,14 @@ function buildGenerationConfigFromForm(form) {
   }
 
   let aiPlan = null;
+  let layoutGraph = null;
   let compiledImagePrompt = null;
   let effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
 
   if (generationMode === "ai-planner") {
     aiPlan = parseAiMapPlan(prompt);
-    compiledImagePrompt = compileInkarnatePrompt(aiPlan);
+    layoutGraph = buildLayoutGraphFromPlan(aiPlan, seed);
+    compiledImagePrompt = compileInkarnatePrompt(aiPlan, layoutGraph);
 
     // AI planner provides the final map intent; map it onto current generator knobs.
     theme = mapAiPlanThemeToSceneTheme(aiPlan);
@@ -602,10 +604,11 @@ function buildGenerationConfigFromForm(form) {
     useDetectedSettings,
     effectiveDetected,
     aiPlan,
+    layoutGraph,
     compiledImagePrompt,
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.11.0"
+    moduleVersion: "0.12.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -683,6 +686,7 @@ function buildGenerationPreviewData(config) {
     appliedFeatures,
     enabledAssetPacks: generationData.enabledAssetPacks,
     aiPlan: generationData.aiPlan,
+    layoutGraph: generationData.layoutGraph,
     compiledImagePrompt: generationData.compiledImagePrompt,
     aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
     estimated: {
@@ -760,6 +764,9 @@ async function openGenerationPreviewDialog(config, previewData) {
   const aiPlanJsonHtml = previewData.aiPlan
     ? foundry.utils.escapeHTML(JSON.stringify(previewData.aiPlan, null, 2))
     : "";
+  const layoutGraphJsonHtml = previewData.layoutGraph
+    ? foundry.utils.escapeHTML(JSON.stringify(previewData.layoutGraph, null, 2))
+    : "";
   const compiledPromptHtml = previewData.compiledImagePrompt
     ? foundry.utils.escapeHTML(previewData.compiledImagePrompt)
     : "";
@@ -770,6 +777,8 @@ async function openGenerationPreviewDialog(config, previewData) {
   <ul>${aiSummaryHtml}</ul>
   <p><strong>Structured JSON Plan</strong></p>
   <pre>${aiPlanJsonHtml}</pre>
+  <p><strong>Layout Graph JSON</strong></p>
+  <pre>${layoutGraphJsonHtml}</pre>
   <p><strong>Compiled Image Prompt Preview</strong></p>
   <pre>${compiledPromptHtml}</pre>
     `
@@ -1166,7 +1175,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.11.0",
+    version: generationData.moduleVersion ?? "0.12.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "procedural",
@@ -1177,6 +1186,7 @@ function buildScenePresetPayload(scene, generationData) {
     seed: generationData.seed,
     lightingMood: generationData.lightingMood ?? "dim",
     aiPlan: generationData.aiPlan ?? null,
+    layoutGraph: generationData.layoutGraph ?? null,
     compiledImagePrompt: generationData.compiledImagePrompt ?? null,
     detected: generationData.detected ?? null,
     detectedFeatures: generationData.detected?.features ?? null,
@@ -1263,9 +1273,12 @@ function validateImportedPreset(rawPreset) {
   const aiPlan = rawPreset.aiPlan
     ?? rawPreset.generationData?.aiPlan
     ?? (generationMode === "ai-planner" ? parseAiMapPlan(prompt) : null);
+  const layoutGraph = rawPreset.layoutGraph
+    ?? rawPreset.generationData?.layoutGraph
+    ?? (aiPlan ? buildLayoutGraphFromPlan(aiPlan, seed) : null);
   const compiledImagePrompt = rawPreset.compiledImagePrompt
     ?? rawPreset.generationData?.compiledImagePrompt
-    ?? (aiPlan ? compileInkarnatePrompt(aiPlan) : null);
+    ?? (aiPlan ? compileInkarnatePrompt(aiPlan, layoutGraph) : null);
 
   const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
   const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
@@ -1284,13 +1297,14 @@ function validateImportedPreset(rawPreset) {
     useDetectedSettings: useDetectedSettings !== false,
     effectiveDetected,
     aiPlan,
+    layoutGraph,
     compiledImagePrompt,
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: Array.isArray(rawPreset.generationLayers)
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.11.0"
+    moduleVersion: "0.12.0"
   };
 
   return {
@@ -1585,11 +1599,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     useDetectedSettings,
     effectiveDetected,
     aiPlan: generationData.aiPlan ?? null,
+    layoutGraph: generationData.layoutGraph ?? null,
     compiledImagePrompt: generationData.compiledImagePrompt ?? null,
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.11.0",
+    moduleVersion: "0.12.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -2467,10 +2482,101 @@ function parseAiMapPlan(prompt) {
 }
 
 /**
+ * Phase 2:
+ * Build a deterministic layout graph from AI planner output + seed.
+ */
+function buildLayoutGraphFromPlan(plan, seed) {
+  const rng = createSeededRng(`${seed}|layout-graph|${JSON.stringify(plan)}`);
+  const positions = ["north", "east", "west", "south", "center", "north-east", "north-west"];
+  const entrancePosition = ["south", "west", "east"][randomInt(rng, 0, 2)];
+
+  const nodes = [
+    { id: "entrance", type: "entrance", position: entrancePosition },
+    { id: "central_area", type: "central_area", position: "center" }
+  ];
+  const edges = [
+    { from: "entrance", to: "central_area" }
+  ];
+
+  const sidePositionOrder = ["east", "west", "north-east", "north-west", "south-east", "south-west"];
+  let sidePositionIndex = 0;
+
+  for (const room of plan.rooms ?? []) {
+    if (room.type === "side_room") {
+      const count = Math.max(1, Number(room.count) || 1);
+      for (let i = 0; i < count; i += 1) {
+        const position = sidePositionOrder[(sidePositionIndex + i) % sidePositionOrder.length];
+        const id = `side_room_${position.replace(/[^a-z]/g, "_")}_${i + 1}`;
+        nodes.push({ id, type: "side_room", position });
+        edges.push({ from: "central_area", to: id });
+      }
+      sidePositionIndex += count;
+      continue;
+    }
+
+    const baseId = room.type || "room";
+    const id = baseId === "boss_room" ? "boss_room" : `${baseId}_${nodes.length}`;
+    const defaultPosition = baseId === "boss_room" ? "north" : positions[randomInt(rng, 0, positions.length - 1)];
+    const position = room.position ?? defaultPosition;
+    nodes.push({ id, type: baseId, position });
+    edges.push({ from: "central_area", to: id });
+  }
+
+  if (!nodes.some((node) => node.type === "boss_room")) {
+    nodes.push({ id: "boss_room", type: "boss_room", position: "north" });
+    edges.push({ from: "central_area", to: "boss_room" });
+  }
+
+  const terrainAnchors = buildTerrainAnchorsFromPlan(plan, rng);
+
+  return {
+    nodes,
+    edges,
+    terrainAnchors
+  };
+}
+
+/**
+ * Convert terrain features into deterministic anchor descriptors for graph + prompt.
+ */
+function buildTerrainAnchorsFromPlan(plan, rng) {
+  const anchors = [];
+  const features = plan.terrainFeatures ?? [];
+
+  const riverPathOptions = ["north_south", "east_west", "diagonal"];
+  if (features.includes("river")) {
+    anchors.push({
+      type: "river",
+      path: riverPathOptions[randomInt(rng, 0, riverPathOptions.length - 1)]
+    });
+  }
+  if (features.includes("bridge")) {
+    anchors.push({ type: "bridge", position: "center" });
+  }
+  if (features.includes("waterfall")) {
+    anchors.push({ type: "waterfall", position: "north" });
+  }
+  if (features.includes("lava")) {
+    anchors.push({ type: "lava", path: "south_arc" });
+  }
+  if (features.includes("cliffs")) {
+    anchors.push({ type: "cliffs", position: "map_edges" });
+  }
+  if (features.includes("road")) {
+    anchors.push({ type: "road", path: "entrance_to_center" });
+  }
+  if (features.includes("docks")) {
+    anchors.push({ type: "docks", position: "south_edge" });
+  }
+
+  return anchors;
+}
+
+/**
  * Compile a strict future-facing image prompt using the AI planner output.
  * This is preview-only text now; no external image generation is called.
  */
-function compileInkarnatePrompt(plan) {
+function compileInkarnatePrompt(plan, layoutGraph = null) {
   const roomSummary = plan.rooms.map((room) => {
     const position = room.position ? ` at ${room.position}` : "";
     const count = room.count ? ` x${room.count}` : "";
@@ -2479,6 +2585,9 @@ function compileInkarnatePrompt(plan) {
 
   const terrainSummary = plan.terrainFeatures.join(", ") || "none";
   const noteSummary = plan.compositionNotes.join("; ") || "balanced composition";
+  const graphSummary = layoutGraph
+    ? summarizeLayoutGraphForPrompt(layoutGraph)
+    : "layout graph not provided";
 
   return `
 TRUE TOP DOWN VTT BATTLE MAP.
@@ -2497,8 +2606,29 @@ Map size: ${plan.mapSize} (${plan.estimatedGrid}).
 Lighting mood: ${plan.lightingMood}.
 Rooms: ${roomSummary || "none"}.
 Terrain features: ${terrainSummary}.
+Layout graph: ${graphSummary}.
 Composition: ${noteSummary}.
   `.trim();
+}
+
+function summarizeLayoutGraphForPrompt(layoutGraph) {
+  const entrance = layoutGraph.nodes.find((node) => node.type === "entrance");
+  const bossRoom = layoutGraph.nodes.find((node) => node.type === "boss_room");
+  const sideRooms = layoutGraph.nodes.filter((node) => node.type === "side_room");
+  const river = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "river");
+  const bridge = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "bridge");
+
+  const parts = [];
+  if (entrance) parts.push(`entrance in ${entrance.position}`);
+  if (bossRoom) parts.push(`boss room in ${bossRoom.position}`);
+  if (sideRooms.length > 0) {
+    const positions = sideRooms.map((room) => room.position).join(" and ");
+    parts.push(`side rooms ${positions}`);
+  }
+  if (river) parts.push(`river runs ${river.path} through center`);
+  if (bridge) parts.push(`bridge crosses river ${bridge.position}`);
+
+  return parts.join("; ") || "central area with branching encounters";
 }
 
 /**
