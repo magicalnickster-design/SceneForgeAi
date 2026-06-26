@@ -283,23 +283,40 @@ function mergeRegistryInto(targetRegistry, sourceRegistry) {
 }
 
 /**
+ * Normalize Foundry render hook HTML argument to a native HTMLElement.
+ * v12 often passes jQuery; v13 can pass native elements.
+ */
+function getHtmlElement(html) {
+  if (html instanceof HTMLElement) return html;
+  if (html?.[0] instanceof HTMLElement) return html[0];
+  return null;
+}
+
+/**
  * Add the "Generate Scene" button to the Scene Directory footer.
  */
 Hooks.on("renderSceneDirectory", (app, html) => {
   if (!game.user?.isGM) return;
-  if (html.find(".sceneforge-generate-btn").length > 0) return;
 
-  const button = $(`
-    <button type="button" class="sceneforge-generate-btn">
-      <i class="fas fa-wand-magic-sparkles"></i> Generate Scene
-    </button>
-  `);
+  const rootElement = getHtmlElement(html);
+  if (!rootElement) {
+    debugLog("renderSceneDirectory received unsupported html payload", html);
+    return;
+  }
 
-  button.on("click", async () => {
+  if (rootElement.querySelector(".sceneforge-generate-btn")) return;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "sceneforge-generate-btn";
+  button.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Generate Scene';
+  button.addEventListener("click", async () => {
     await openGeneratorDialog();
   });
 
-  html.find(".directory-footer").append(button);
+  const footer = rootElement.querySelector(".directory-footer");
+  if (footer) footer.appendChild(button);
+  else rootElement.appendChild(button);
 });
 
 /**
@@ -516,7 +533,7 @@ function buildGenerationConfigFromForm(form) {
     effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.10.1"
+    moduleVersion: "0.10.2"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1050,7 +1067,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.10.1",
+    version: generationData.moduleVersion ?? "0.10.2",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -1157,7 +1174,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.1"
+    moduleVersion: "0.10.2"
   };
 
   return {
@@ -1452,7 +1469,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.1",
+    moduleVersion: "0.10.2",
     lastGeneratedAt: Date.now()
   });
 }
