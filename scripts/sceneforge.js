@@ -795,7 +795,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.14.2"
+    moduleVersion: "0.14.3"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1676,7 +1676,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.14.2",
+    version: generationData.moduleVersion ?? "0.14.3",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "procedural",
@@ -1819,7 +1819,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.2"
+    moduleVersion: "0.14.3"
   };
 
   return {
@@ -2007,8 +2007,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
   const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
-  const mergedTiles = [...tileLayers.floorTiles, ...tileLayers.propTiles];
-  const validatedTiles = await applyTileFallbackModeToTiles(mergedTiles);
+  const validatedTiles = await applyTileFallbackModeToTileLayers(tileLayers);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -2129,7 +2128,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.2",
+    moduleVersion: "0.14.3",
     lastGeneratedAt: Date.now()
   });
 
@@ -2731,6 +2730,18 @@ async function applyTileFallbackModeToTiles(tiles) {
   }
 
   return filterTilesWithAvailableAssets(tiles);
+}
+
+/**
+ * Applies fallback handling to layered tile output from buildThemeTiles.
+ * Keeps layer merge logic separate from source validation.
+ */
+async function applyTileFallbackModeToTileLayers(tileLayers) {
+  if (!tileLayers || typeof tileLayers !== "object") return [];
+  const floorTiles = Array.isArray(tileLayers.floorTiles) ? tileLayers.floorTiles : [];
+  const propTiles = Array.isArray(tileLayers.propTiles) ? tileLayers.propTiles : [];
+  const mergedTiles = [...floorTiles, ...propTiles];
+  return applyTileFallbackModeToTiles(mergedTiles);
 }
 
 /**
