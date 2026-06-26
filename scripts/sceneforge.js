@@ -17,6 +17,7 @@ const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
 const DEBUG = false;
+const GLOBAL_IMAGE_LIBRARY_ONLY = true;
 const TILE_FALLBACK_MODE = "skip-missing";
 // Temporary product-focus switch: disable all spawned tile/prop/pack assets.
 const ENABLE_ASSET_SPAWNING = false;
@@ -645,8 +646,8 @@ function normalizePromptForReuse(prompt) {
 }
 
 function canUseGlobalImageDumpLibrary() {
-  const provider = getAiImageProvider();
-  if (provider !== "subscription") return false;
+  if (!GLOBAL_IMAGE_LIBRARY_ONLY) return false;
+  if (getAiImageProvider() !== "subscription") return false;
   return Boolean(getSubscriptionBackendUrl() && getSubscriptionAuthToken());
 }
 
@@ -671,6 +672,19 @@ async function callGlobalImageDumpApi(path, { method = "POST", body = null } = {
     logImagePipelineError("global image dump api exception", { endpoint, method }, error);
     return { ok: false, status: 0, payload: null };
   }
+}
+
+function buildSceneNameFromPrompt(prompt, options = {}) {
+  const { prefix = "SceneForge", fallback = "Map" } = options;
+  const words = String(prompt ?? "")
+    .trim()
+    .replace(/[^a-z0-9\s-]/gi, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 0)
+    .slice(0, 5);
+  const label = words.length > 0 ? words.join(" ") : fallback;
+  const title = label.replace(/\b\w/g, (c) => c.toUpperCase());
+  return `${prefix} - ${title}`;
 }
 
 function getImageDumpLibrary() {
@@ -703,41 +717,29 @@ async function findReusableImageEntryForPrompt(prompt) {
   const promptExact = normalizePromptForReuse(prompt);
   if (!promptExact) return null;
 
-  // Global library path: exact prompt match shared across all subscribed users.
-  if (canUseGlobalImageDumpLibrary()) {
-    const response = await callGlobalImageDumpApi("/api/maps/reuse/exact", {
-      method: "POST",
-      body: { promptExact }
-    });
-    if (response.ok) {
-      const match = response.payload?.entry ?? response.payload?.match ?? null;
-      if (match?.imagePath) {
-        return {
-          id: match.id ?? null,
-          promptExact,
-          imagePath: String(match.imagePath),
-          provider: "subscription",
-          source: "global"
-        };
-      }
-    }
+  if (!canUseGlobalImageDumpLibrary()) {
+    throw new Error("Global image library is required. Configure Subscription provider, backend URL, and auth token.");
   }
 
-  // Local world-level fallback (legacy/offline mode).
-  const library = getImageDumpLibrary();
-  const candidates = library.entries.filter((entry) =>
-    entry?.promptExact === promptExact
-    && typeof entry?.imagePath === "string"
-    && entry.imagePath.trim().length > 0
-    && Number(entry.dislikes ?? 0) <= Number(entry.likes ?? 0)
-  );
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => {
-    const scoreDelta = scoreImageDumpEntry(b) - scoreImageDumpEntry(a);
-    if (scoreDelta !== 0) return scoreDelta;
-    return Number(b?.createdAt ?? 0) - Number(a?.createdAt ?? 0);
+  const response = await callGlobalImageDumpApi("/api/maps/reuse/exact", {
+    method: "POST",
+    body: {
+      promptExact,
+      requirePositiveVote: true
+    }
   });
-  return candidates[0];
+  if (!response.ok) {
+    throw new Error(`Global reuse lookup failed (${response.status || "network"}).`);
+  }
+  const match = response.payload?.entry ?? response.payload?.match ?? null;
+  if (!match?.imagePath) return null;
+  return {
+    id: match.id ?? null,
+    promptExact,
+    imagePath: String(match.imagePath),
+    provider: "subscription",
+    source: "global"
+  };
 }
 
 async function upsertImageDumpEntry(entry) {
@@ -774,75 +776,47 @@ async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMe
   const promptExact = normalizePromptForReuse(generationData?.prompt ?? "");
   if (!promptExact || !imagePath || !scene) return null;
 
-  if (canUseGlobalImageDumpLibrary()) {
-    const response = await callGlobalImageDumpApi("/api/maps/library/upsert", {
-      method: "POST",
-      body: {
-        promptExact,
-        imagePath,
-        categoryKey: getPlanCategoryKey(generationData?.aiPlan ?? null),
-        provider: imageGenerationMetadata?.provider ?? "unknown",
-        seed: generationData?.seed ?? "",
-        sceneId: scene.id,
-        compiledPrompt: generationData?.compiledImagePrompt ?? ""
-      }
-    });
-    const globalEntryId = response.payload?.entry?.id ?? response.payload?.id ?? null;
-    if (response.ok && globalEntryId) {
-      await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, globalEntryId);
-      return { id: globalEntryId, promptExact, imagePath };
-    }
+  if (!canUseGlobalImageDumpLibrary()) {
+    throw new Error("Global image library is required for image persistence.");
   }
 
-  const entry = await upsertImageDumpEntry({
-    promptExact,
-    imagePath,
-    categoryKey: getPlanCategoryKey(generationData?.aiPlan ?? null),
-    provider: imageGenerationMetadata?.provider ?? "unknown",
-    seed: generationData?.seed ?? "",
-    sceneId: scene.id,
-    compiledPrompt: generationData?.compiledImagePrompt ?? "",
-    likes: 0,
-    dislikes: 0,
-    votes: {},
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    lastUsedAt: Date.now(),
-    usageCount: 1
+  const response = await callGlobalImageDumpApi("/api/maps/library/upsert", {
+    method: "POST",
+    body: {
+      promptExact,
+      imagePath,
+      categoryKey: getPlanCategoryKey(generationData?.aiPlan ?? null),
+      provider: imageGenerationMetadata?.provider ?? "unknown",
+      seed: generationData?.seed ?? "",
+      sceneId: scene.id,
+      compiledPrompt: generationData?.compiledImagePrompt ?? ""
+    }
   });
-  await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entry.id);
-  return entry;
+  const globalEntryId = response.payload?.entry?.id ?? response.payload?.id ?? null;
+  if (!response.ok || !globalEntryId) {
+    throw new Error(`Global image upsert failed (${response.status || "network"}).`);
+  }
+  await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, globalEntryId);
+  return { id: globalEntryId, promptExact, imagePath };
 }
 
 async function markImageDumpEntryUsed(entryId, scene) {
   if (!entryId) return;
-  if (canUseGlobalImageDumpLibrary()) {
-    const response = await callGlobalImageDumpApi("/api/maps/library/mark-used", {
-      method: "POST",
-      body: {
-        entryId,
-        sceneId: scene?.id ?? null
-      }
-    });
-    if (response.ok) {
-      if (scene) await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entryId);
-      return;
-    }
+  if (!canUseGlobalImageDumpLibrary()) {
+    throw new Error("Global image library is required for usage tracking.");
   }
-
-  const library = getImageDumpLibrary();
-  const entry = library.entries.find((item) => item?.id === entryId);
-  if (!entry) return;
-  const updated = {
-    ...entry,
-    sceneId: scene?.id ?? entry.sceneId,
-    usageCount: Number(entry.usageCount ?? 0) + 1,
-    lastUsedAt: Date.now(),
-    updatedAt: Date.now()
-  };
-  await upsertImageDumpEntry(updated);
+  const response = await callGlobalImageDumpApi("/api/maps/library/mark-used", {
+    method: "POST",
+    body: {
+      entryId,
+      sceneId: scene?.id ?? null
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Global usage update failed (${response.status || "network"}).`);
+  }
   if (scene) {
-    await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, updated.id);
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entryId);
   }
 }
 
@@ -855,51 +829,55 @@ async function voteOnSceneMap(scene, voteValue) {
   const userId = game.user?.id;
   if (!userId) return;
 
-  if (canUseGlobalImageDumpLibrary()) {
-    const response = await callGlobalImageDumpApi("/api/maps/library/vote", {
-      method: "POST",
-      body: {
-        entryId,
-        vote: Number(voteValue)
-      }
-    });
-    if (response.ok) {
-      ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
-      return;
+  if (!canUseGlobalImageDumpLibrary()) {
+    ui.notifications.error("SceneForge AI: Global vote service is required.");
+    return;
+  }
+
+  const response = await callGlobalImageDumpApi("/api/maps/library/vote", {
+    method: "POST",
+    body: {
+      entryId,
+      vote: Number(voteValue)
     }
-  }
-
-  const library = getImageDumpLibrary();
-  const entry = library.entries.find((item) => item?.id === entryId);
-  if (!entry) {
-    ui.notifications.warn("SceneForge AI: Image dump entry is missing.");
-    return;
-  }
-
-  const votes = { ...(entry.votes ?? {}) };
-  const previous = Number(votes[userId] ?? 0);
-  const next = Number(voteValue);
-  if (previous === next) {
-    ui.notifications.info("SceneForge AI: Your vote is already recorded.");
-    return;
-  }
-
-  let likes = Number(entry.likes ?? 0);
-  let dislikes = Number(entry.dislikes ?? 0);
-  if (previous === 1) likes = Math.max(0, likes - 1);
-  if (previous === -1) dislikes = Math.max(0, dislikes - 1);
-  if (next === 1) likes += 1;
-  if (next === -1) dislikes += 1;
-  votes[userId] = next;
-
-  await upsertImageDumpEntry({
-    ...entry,
-    likes,
-    dislikes,
-    votes,
-    updatedAt: Date.now()
   });
-  ui.notifications.info(`SceneForge AI: Vote saved (${next === 1 ? "Liked" : "Disliked"}).`);
+  if (response.ok) {
+    ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
+    return;
+  }
+
+  ui.notifications.error(`SceneForge AI: Global vote failed (${response.status || "network"}).`);
+}
+
+async function promptForGeneratedSceneVote(scene) {
+  if (!scene) return;
+  await new Promise((resolve) => {
+    const dialog = new Dialog({
+      title: "SceneForge AI: Keep this map for reuse?",
+      content: "<p>Do you like this generated map?</p>",
+      buttons: {
+        yes: {
+          icon: '<i class="fas fa-thumbs-up"></i>',
+          label: "Yes, keep for reuse",
+          callback: async () => {
+            await voteOnSceneMap(scene, 1);
+            resolve();
+          }
+        },
+        no: {
+          icon: '<i class="fas fa-thumbs-down"></i>',
+          label: "No, do not reuse",
+          callback: async () => {
+            await voteOnSceneMap(scene, -1);
+            resolve();
+          }
+        }
+      },
+      default: "yes",
+      close: () => resolve()
+    });
+    dialog.render(true);
+  });
 }
 
 function getCategoryReferenceSummary(plan) {
@@ -1621,7 +1599,10 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
   const heightPx = gridCells * GRID_SIZE_PX;
-  const sceneName = `${sceneNamePrefix} - ${generationData.seed}`;
+  const sceneName = buildSceneNameFromPrompt(generationData?.prompt ?? "", {
+    prefix: sceneNamePrefix,
+    fallback: "Map"
+  });
 
   let createdScene = null;
   try {
@@ -1721,12 +1702,15 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
         await markImageDumpEntryUsed(resolvedGenerationData.imageGeneration.cacheEntryId, scene);
       } else if (resolvedGenerationData.imageGeneration?.provider !== "none") {
-        await recordGeneratedImageDumpEntry({
+        const recordedEntry = await recordGeneratedImageDumpEntry({
           generationData: resolvedGenerationData,
           imageGenerationMetadata: resolvedGenerationData.imageGeneration,
           imagePath: persistedBackgroundPath,
           scene
         });
+        if (!recordedEntry?.id) {
+          throw new Error("Generated image could not be stored in global library.");
+        }
       }
     }
 
@@ -1737,6 +1721,12 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (shouldShowCreatedSuccess) {
       ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
     }
+    try {
+      await scene.activate();
+    } catch (_activateError) {
+      // Non-fatal: scene already exists even if activation fails.
+    }
+    await promptForGeneratedSceneVote(scene);
   } catch (error) {
     if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && createdScene) {
       logImagePipelineError("scene creation failed after OpenAI image generation", {
@@ -1761,7 +1751,26 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
  * Main image-generation path using configured provider architecture.
  */
 async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
-  const reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
+  if (GLOBAL_IMAGE_LIBRARY_ONLY) {
+    const provider = getAiImageProvider();
+    if (provider !== "subscription") {
+      ui.notifications.error("SceneForge AI: Global library mode requires AI provider set to Subscription Backend.");
+      return;
+    }
+    if (!canUseGlobalImageDumpLibrary()) {
+      ui.notifications.error("SceneForge AI: Global library mode requires backend URL and subscription auth token.");
+      return;
+    }
+  }
+
+  let reusableEntry = null;
+  try {
+    reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
+  } catch (error) {
+    logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
+    ui.notifications.error("SceneForge AI: Global cache lookup failed. Generation blocked until service is reachable.");
+    return;
+  }
   if (reusableEntry) {
     console.info(`${MODULE_ID} | Reusing cached image from dump library`, {
       entryId: reusableEntry.id,
