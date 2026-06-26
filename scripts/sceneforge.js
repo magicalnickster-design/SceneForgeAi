@@ -14,6 +14,7 @@ const MODULE_ID = "sceneforge-ai";
 const GRID_SIZE_PX = 100;
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
+const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const DEBUG = false;
 const TILE_FALLBACK_MODE = "skip-missing";
 
@@ -132,6 +133,7 @@ const AI_PLANNER_LIGHTING_MOODS = ["bright", "dim", "dark", "magical", "torchlit
 const SETTING_PREMIUM_TAVERN_PACK = "enablePremiumTavernPack";
 const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
 const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
+const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
 
 /**
  * Base registry ships with the core module.
@@ -245,6 +247,21 @@ function registerAssetPackSettings() {
     type: Boolean,
     default: false
   });
+
+  game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
+    name: "AI Image Provider",
+    hint: "Select provider architecture target. Mock does not call external APIs.",
+    scope: "world",
+    config: true,
+    type: String,
+    choices: {
+      none: "None",
+      mock: "Mock Provider",
+      openai: "OpenAI placeholder",
+      stability: "Stability placeholder"
+    },
+    default: "none"
+  });
 }
 
 /**
@@ -295,6 +312,10 @@ function getEnabledAssetPackIds() {
   if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) packIds.push("dark-dungeon");
   if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) packIds.push("rune-ruins");
   return packIds;
+}
+
+function getAiImageProvider() {
+  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "none");
 }
 
 /**
@@ -606,9 +627,19 @@ function buildGenerationConfigFromForm(form) {
     aiPlan,
     layoutGraph,
     compiledImagePrompt,
+    imageGeneration: {
+      provider: getAiImageProvider(),
+      compiledPrompt: compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.12.0"
+    moduleVersion: "0.13.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -688,6 +719,11 @@ function buildGenerationPreviewData(config) {
     aiPlan: generationData.aiPlan,
     layoutGraph: generationData.layoutGraph,
     compiledImagePrompt: generationData.compiledImagePrompt,
+    aiImageProvider: generationData.imageGeneration?.provider ?? "none",
+    aiImageCostEstimate: generationData.imageGeneration?.costEstimate ?? {
+      preview: "$0.00 mock",
+      final: "$0.08 placeholder"
+    },
     aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
     estimated: {
       walls: walls.length,
@@ -781,6 +817,8 @@ async function openGenerationPreviewDialog(config, previewData) {
   <pre>${layoutGraphJsonHtml}</pre>
   <p><strong>Compiled Image Prompt Preview</strong></p>
   <pre>${compiledPromptHtml}</pre>
+  <p><strong>AI Image Provider:</strong> ${foundry.utils.escapeHTML(previewData.aiImageProvider)}</p>
+  <p><strong>Cost Estimate:</strong> preview image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.preview)}, final image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.final)}</p>
     `
     : "";
 
@@ -823,26 +861,36 @@ async function openGenerationPreviewDialog(config, previewData) {
   `;
 
   const userChoice = await new Promise((resolve) => {
+    const buttons = {
+      confirm: {
+        icon: '<i class="fas fa-check"></i>',
+        label: "Confirm Generate",
+        callback: () => resolve("confirm")
+      },
+      back: {
+        icon: '<i class="fas fa-arrow-left"></i>',
+        label: "Back / Edit",
+        callback: () => resolve("back")
+      },
+      cancel: {
+        icon: '<i class="fas fa-times"></i>',
+        label: "Cancel",
+        callback: () => resolve("cancel")
+      }
+    };
+
+    if (previewData.generationMode === "ai-planner") {
+      buttons.mock = {
+        icon: '<i class="fas fa-image"></i>',
+        label: "Generate Mock AI Map",
+        callback: () => resolve("mock")
+      };
+    }
+
     const dialog = new Dialog({
       title: "SceneForge Preview Mode",
       content,
-      buttons: {
-        confirm: {
-          icon: '<i class="fas fa-check"></i>',
-          label: "Confirm Generate",
-          callback: () => resolve("confirm")
-        },
-        back: {
-          icon: '<i class="fas fa-arrow-left"></i>',
-          label: "Back / Edit",
-          callback: () => resolve("back")
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => resolve("cancel")
-        }
-      },
+      buttons,
       default: "confirm",
       close: () => resolve("cancel")
     });
@@ -853,6 +901,10 @@ async function openGenerationPreviewDialog(config, previewData) {
     await openGeneratorDialog(config.formState);
     return;
   }
+  if (userChoice === "mock") {
+    await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
+    return;
+  }
   if (userChoice !== "confirm") return;
 
   await createSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
@@ -861,13 +913,18 @@ async function openGenerationPreviewDialog(config, previewData) {
 /**
  * Shared scene creation path used after preview confirmation.
  */
-async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false, options = {}) {
+  const { backgroundPath = null, imageGenerationMetadata = null } = options;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
   const heightPx = gridCells * GRID_SIZE_PX;
   const sceneName = `SceneForge - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   try {
+    const resolvedGenerationData = imageGenerationMetadata
+      ? { ...generationData, imageGeneration: imageGenerationMetadata }
+      : generationData;
+
     const scene = await Scene.create({
       name: sceneName,
       width: widthPx,
@@ -883,23 +940,130 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       navigation: true,
       flags: {
         [MODULE_ID]: {
-          [FLAG_GENERATION_KEY]: generationData
+          [FLAG_GENERATION_KEY]: resolvedGenerationData
         }
       }
     });
 
     if (!scene) throw new Error("Scene creation returned no scene document.");
 
-    await generateSceneLayout(scene, generationData);
+    if (backgroundPath) {
+      await scene.update({
+        background: {
+          src: backgroundPath
+        }
+      });
+    }
+
+    if (imageGenerationMetadata) {
+      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, imageGenerationMetadata);
+    }
+
+    await generateSceneLayout(scene, resolvedGenerationData);
 
     if (seedWasAutoGenerated) {
-      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${generationData.seed}".`);
+      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${resolvedGenerationData.seed}".`);
     }
     ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
   } catch (error) {
     console.error(`${MODULE_ID} | Scene generation failed`, error);
     ui.notifications.error("SceneForge AI: Failed to generate scene. Check browser console for details.");
   }
+}
+
+/**
+ * Preview button path for AI Planner Mode.
+ * Uses provider architecture but only mock/non-network behavior for now.
+ */
+async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+  const compiledPrompt = generationData.compiledImagePrompt ?? "";
+  const imageResult = await generateAiMapImage(compiledPrompt, {
+    mode: "preview",
+    seed: generationData.seed
+  });
+
+  if (!imageResult?.imagePath) {
+    ui.notifications.warn("SceneForge AI: Mock image generation did not produce a background path.");
+  }
+
+  const imageGenerationMetadata = {
+    provider: imageResult.provider,
+    compiledPrompt,
+    imageStatus: imageResult.imageStatus,
+    imagePath: imageResult.imagePath,
+    costEstimate: imageResult.costEstimate
+  };
+
+  await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+    backgroundPath: imageResult.imagePath ?? null,
+    imageGenerationMetadata
+  });
+}
+
+/**
+ * Provider architecture shell for future real AI image integrations.
+ * For now: no external API calls, mock/local behavior only.
+ */
+async function generateAiMapImage(compiledPrompt, options = {}) {
+  const configuredProvider = getAiImageProvider();
+  const provider = configuredProvider === "none" ? "mock" : configuredProvider;
+
+  if (provider === "mock") {
+    debugLog("Mock provider compiled prompt", compiledPrompt);
+    const imagePath = buildMockMapBackgroundDataUri(options);
+    return {
+      provider: "mock",
+      imageStatus: "mock-generated",
+      imagePath,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    };
+  }
+
+  // Placeholder architecture for future provider integrations (no API calls yet).
+  return {
+    provider: configuredProvider,
+    imageStatus: "not-generated",
+    imagePath: null,
+    costEstimate: {
+      preview: "$0.00 mock",
+      final: "$0.08 placeholder"
+    }
+  };
+}
+
+/**
+ * Build a simple SVG data URI as local placeholder background.
+ */
+function buildMockMapBackgroundDataUri(options = {}) {
+  const size = 1024;
+  const seed = String(options.seed ?? "mock");
+  const colorA = "#2f3e46";
+  const colorB = "#1f2a30";
+  const colorC = "#4f6d7a";
+  const label = `SceneForge Mock ${seed}`.replace(/&/g, "&amp;");
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${colorA}" />
+      <stop offset="100%" stop-color="${colorB}" />
+    </linearGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0 L0 0 0 64" fill="none" stroke="${colorC}" stroke-opacity="0.2" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="${size}" height="${size}" fill="url(#bg)" />
+  <rect width="${size}" height="${size}" fill="url(#grid)" />
+  <circle cx="${size / 2}" cy="${size / 2}" r="${size / 5}" fill="${colorC}" fill-opacity="0.2" />
+  <text x="${size / 2}" y="${size - 40}" text-anchor="middle" font-size="26" fill="#d9e4ea" fill-opacity="0.85">${label}</text>
+</svg>
+  `.trim();
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 /**
@@ -1175,7 +1339,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.12.0",
+    version: generationData.moduleVersion ?? "0.13.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "procedural",
@@ -1188,6 +1352,7 @@ function buildScenePresetPayload(scene, generationData) {
     aiPlan: generationData.aiPlan ?? null,
     layoutGraph: generationData.layoutGraph ?? null,
     compiledImagePrompt: generationData.compiledImagePrompt ?? null,
+    imageGeneration: generationData.imageGeneration ?? null,
     detected: generationData.detected ?? null,
     detectedFeatures: generationData.detected?.features ?? null,
     useDetectedSettings: generationData.useDetectedSettings !== false,
@@ -1279,6 +1444,18 @@ function validateImportedPreset(rawPreset) {
   const compiledImagePrompt = rawPreset.compiledImagePrompt
     ?? rawPreset.generationData?.compiledImagePrompt
     ?? (aiPlan ? compileInkarnatePrompt(aiPlan, layoutGraph) : null);
+  const imageGeneration = rawPreset.imageGeneration
+    ?? rawPreset.generationData?.imageGeneration
+    ?? {
+      provider: getAiImageProvider(),
+      compiledPrompt: compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    };
 
   const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
   const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
@@ -1299,12 +1476,13 @@ function validateImportedPreset(rawPreset) {
     aiPlan,
     layoutGraph,
     compiledImagePrompt,
+    imageGeneration,
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: Array.isArray(rawPreset.generationLayers)
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.12.0"
+    moduleVersion: "0.13.0"
   };
 
   return {
@@ -1601,12 +1779,26 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     aiPlan: generationData.aiPlan ?? null,
     layoutGraph: generationData.layoutGraph ?? null,
     compiledImagePrompt: generationData.compiledImagePrompt ?? null,
+    imageGeneration: generationData.imageGeneration ?? {
+      provider: getAiImageProvider(),
+      compiledPrompt: generationData.compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    },
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.12.0",
+    moduleVersion: "0.13.0",
     lastGeneratedAt: Date.now()
   });
+
+  if (generationData.imageGeneration) {
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, generationData.imageGeneration);
+  }
 }
 
 /**
