@@ -728,7 +728,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.14.0"
+    moduleVersion: "0.14.1"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1577,7 +1577,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.14.0",
+    version: generationData.moduleVersion ?? "0.14.1",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "procedural",
@@ -1720,7 +1720,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.0"
+    moduleVersion: "0.14.1"
   };
 
   return {
@@ -1906,7 +1906,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
   const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
-  const validatedTileLayers = await applyTileFallbackModeToTileLayers(tileLayers);
+  const mergedTiles = [...tileLayers.floorTiles, ...tileLayers.propTiles];
+  const validatedTiles = await applyTileFallbackModeToTiles(mergedTiles);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -1919,12 +1920,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await scene.createEmbeddedDocuments("Wall", walls);
   }
 
-  if (validatedTileLayers.floorTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.floorTiles);
-  }
-
-  if (validatedTileLayers.propTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.propTiles);
+  if (validatedTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", validatedTiles);
   }
 
   if (lights.length > 0) {
@@ -2030,7 +2027,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.0",
+    moduleVersion: "0.14.1",
     lastGeneratedAt: Date.now()
   });
 
@@ -2627,15 +2624,12 @@ function rectOverlapsWalls(rect, walls, wallPadding = 0) {
  * Built-in fallback mode for missing placeholder assets.
  * Currently we skip missing-image tiles so scenes stay clean.
  */
-async function applyTileFallbackModeToTileLayers(tileLayers) {
+async function applyTileFallbackModeToTiles(tiles) {
   if (TILE_FALLBACK_MODE !== "skip-missing") {
-    return tileLayers;
+    return tiles;
   }
 
-  return {
-    floorTiles: await filterTilesWithAvailableAssets(tileLayers.floorTiles),
-    propTiles: await filterTilesWithAvailableAssets(tileLayers.propTiles)
-  };
+  return filterTilesWithAvailableAssets(tiles);
 }
 
 /**
@@ -2648,7 +2642,7 @@ async function filterTilesWithAvailableAssets(tiles) {
     const src = tile?.texture?.src;
     const exists = await isAssetPathAvailable(src);
     if (!exists) {
-      debugLog("Skipping tile with missing asset path", src);
+      debugLog("Skipping missing asset:", src);
       continue;
     }
     kept.push(tile);
