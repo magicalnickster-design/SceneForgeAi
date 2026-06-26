@@ -59,17 +59,18 @@ const FEATURE_KEYS = [
 ];
 
 /**
- * Placeholder asset registry for theme-based tile generation.
- * We use string paths now so later you can swap these to premium pack paths.
- *
- * Notes:
- * - key names are normalized theme keys
- * - layer controls generation ordering (floor -> prop)
- * - rarity controls spawn chance uniqueness
- * - count is a [min, max] range for how many attempts to place
- * - placement hints drive intelligent placement logic
+ * Settings keys for optional premium-style asset packs.
+ * Base assets are always included and do not need a setting.
  */
-const ASSET_REGISTRY = {
+const SETTING_PREMIUM_TAVERN_PACK = "enablePremiumTavernPack";
+const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
+const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
+
+/**
+ * Base registry ships with the core module.
+ * Future premium packs can be merged in additively via getActiveAssetRegistry().
+ */
+const baseRegistry = {
   tavern: [
     { id: "table", src: "/assets/tavern/table.png", width: 180, height: 120, layer: "prop", rarity: "common", count: [3, 6], placement: "room" },
     { id: "chair", src: "/assets/tavern/chair.png", width: 70, height: 70, layer: "prop", rarity: "common", count: [6, 12], placement: "room" },
@@ -107,9 +108,138 @@ const ASSET_REGISTRY = {
   ]
 };
 
+/**
+ * Optional add-on: Premium Tavern Pack placeholders.
+ * These paths are examples for future Patreon/subscriber art bundles.
+ */
+const premiumTavernRegistry = {
+  tavern: [
+    { id: "premium-round-table", src: "/assets/premium/tavern/round-table.png", width: 210, height: 150, layer: "prop", rarity: "common", count: [2, 4], placement: "room" },
+    { id: "premium-lantern-chandelier", src: "/assets/premium/tavern/chandelier.png", width: 130, height: 130, layer: "prop", rarity: "rare", count: [1, 1], placement: "center" },
+    { id: "premium-wall-keg-rack", src: "/assets/premium/tavern/keg-rack.png", width: 240, height: 110, layer: "prop", rarity: "common", count: [1, 2], placement: "wall-near" }
+  ]
+};
+
+/**
+ * Optional add-on: Dark Dungeon Pack placeholders.
+ */
+const darkDungeonRegistry = {
+  dungeon: [
+    { id: "dark-blood-altar", src: "/assets/premium/dark-dungeon/blood-altar.png", width: 260, height: 170, layer: "prop", rarity: "rare", count: [1, 1], placement: "center" },
+    { id: "dark-iron-maiden", src: "/assets/premium/dark-dungeon/iron-maiden.png", width: 120, height: 210, layer: "prop", rarity: "rare", count: [1, 2], placement: "wall-near" },
+    { id: "dark-torture-rack", src: "/assets/premium/dark-dungeon/torture-rack.png", width: 240, height: 140, layer: "prop", rarity: "common", count: [1, 2], placement: "room" }
+  ]
+};
+
+/**
+ * Optional add-on: Rune Ruins Pack placeholders.
+ */
+const runeRuinsRegistry = {
+  forestRuins: [
+    { id: "rune-obelisk", src: "/assets/premium/rune-ruins/rune-obelisk.png", width: 160, height: 240, layer: "prop", rarity: "rare", count: [1, 2], placement: "room" },
+    { id: "rune-circle", src: "/assets/premium/rune-ruins/rune-circle.png", width: 280, height: 280, layer: "floor", rarity: "common", count: [1, 1], placement: "center" },
+    { id: "rune-shard-cluster", src: "/assets/premium/rune-ruins/rune-shards.png", width: 150, height: 110, layer: "floor", rarity: "common", count: [3, 6], placement: "random" }
+  ]
+};
+
 Hooks.once("init", () => {
   console.log(`${MODULE_ID} | Initializing SceneForge AI module`);
+  registerAssetPackSettings();
 });
+
+/**
+ * Registers user-facing module settings for optional asset packs.
+ * Location in Foundry: Game Settings -> Configure Settings -> Module Settings.
+ */
+function registerAssetPackSettings() {
+  game.settings.register(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK, {
+    name: "Premium Tavern Pack",
+    hint: "Enable additive tavern assets from /assets/premium/tavern/...",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_DARK_DUNGEON_PACK, {
+    name: "Dark Dungeon Pack",
+    hint: "Enable additive dungeon assets from /assets/premium/dark-dungeon/...",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_RUNE_RUINS_PACK, {
+    name: "Rune Ruins Pack",
+    hint: "Enable additive forest ruins assets from /assets/premium/rune-ruins/...",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
+}
+
+/**
+ * Merge base registry + enabled pack registries into one active registry.
+ *
+ * Beginner note:
+ * To add a new future Patreon pack:
+ *  1) create a new <packName>Registry object with theme arrays
+ *  2) register a module setting toggle
+ *  3) include the registry in this function when toggle is enabled
+ */
+function getActiveAssetRegistry() {
+  const merged = cloneRegistryWithPackMeta(baseRegistry, "base");
+
+  if (game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK)) {
+    mergeRegistryInto(merged, cloneRegistryWithPackMeta(premiumTavernRegistry, "premium-tavern"));
+  }
+  if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) {
+    mergeRegistryInto(merged, cloneRegistryWithPackMeta(darkDungeonRegistry, "dark-dungeon"));
+  }
+  if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) {
+    mergeRegistryInto(merged, cloneRegistryWithPackMeta(runeRuinsRegistry, "rune-ruins"));
+  }
+
+  return merged;
+}
+
+/**
+ * Returns active non-base pack IDs, useful for debugging and scene flags.
+ */
+function getEnabledAssetPackIds() {
+  const packIds = [];
+  if (game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK)) packIds.push("premium-tavern");
+  if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) packIds.push("dark-dungeon");
+  if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) packIds.push("rune-ruins");
+  return packIds;
+}
+
+/**
+ * Clone registry and decorate each asset with pack metadata.
+ */
+function cloneRegistryWithPackMeta(registry, packId) {
+  const clone = {};
+  for (const [themeKey, assets] of Object.entries(registry)) {
+    clone[themeKey] = assets.map((asset) => ({
+      ...asset,
+      packId,
+      theme: normalizeRegistryThemeToSceneTheme(themeKey)
+    }));
+  }
+  return clone;
+}
+
+/**
+ * In-place additive merge: append pack assets to existing theme arrays.
+ */
+function mergeRegistryInto(targetRegistry, sourceRegistry) {
+  for (const [themeKey, assets] of Object.entries(sourceRegistry)) {
+    if (!targetRegistry[themeKey]) targetRegistry[themeKey] = [];
+    targetRegistry[themeKey].push(...assets);
+  }
+}
 
 /**
  * Add the "Generate Scene" button to the Scene Directory footer.
@@ -300,8 +430,9 @@ async function handleGenerate(dialogHtml) {
     detected,
     useDetectedSettings,
     effectiveDetected,
+    enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.5.0"
+    moduleVersion: "0.6.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -653,9 +784,10 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     detected,
     useDetectedSettings,
     effectiveDetected,
+    enabledAssetPacks: getEnabledAssetPackIds(),
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.5.0",
+    moduleVersion: "0.6.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -962,7 +1094,8 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected) {
  */
 function buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, detected) {
   const registryThemeKey = normalizeThemeToRegistryKey(theme);
-  const assetEntries = ASSET_REGISTRY[registryThemeKey] ?? [];
+  const activeRegistry = getActiveAssetRegistry();
+  const assetEntries = activeRegistry[registryThemeKey] ?? [];
   const contexts = buildPlacementContexts(registryThemeKey, widthPx, heightPx);
   const occupied = [];
   const floorTiles = [];
@@ -1013,6 +1146,14 @@ function buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, detected) {
 function normalizeThemeToRegistryKey(theme) {
   if (theme === "forest-ruins") return "forestRuins";
   return theme;
+}
+
+/**
+ * Convert registry key back to scene-facing theme key for metadata flags.
+ */
+function normalizeRegistryThemeToSceneTheme(registryThemeKey) {
+  if (registryThemeKey === "forestRuins") return "forest-ruins";
+  return registryThemeKey;
 }
 
 /**
@@ -1185,7 +1326,10 @@ function buildTileDataFromAsset(asset, x, y, rng, seed) {
         [FLAG_GENERATED_KEY]: true,
         kind: "tile",
         layer: asset.layer,
+        packId: asset.packId ?? "base",
         assetId: asset.id,
+        rarity: asset.rarity ?? "common",
+        theme: asset.theme ?? "unknown",
         assetPath: asset.src,
         seed
       }
