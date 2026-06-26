@@ -153,6 +153,56 @@ function getSceneBackgroundSrc(scene) {
   );
 }
 
+function getPrimarySceneLevel(scene) {
+  const fromLevelsCollection = scene?.levels?.contents?.[0] ?? null;
+  if (fromLevelsCollection) return fromLevelsCollection;
+  const fromEmbeddedCollection = scene?.collections?.levels?.contents?.[0] ?? null;
+  return fromEmbeddedCollection;
+}
+
+async function applyBackgroundToScene(scene, backgroundSrc) {
+  if (!scene || !backgroundSrc) {
+    return {
+      applied: false,
+      finalBackgroundSrc: null
+    };
+  }
+
+  // Attempt 1: legacy scene-level background path (v12/v13 compatibility).
+  await scene.update({
+    background: {
+      src: backgroundSrc
+    }
+  });
+  let finalBackgroundSrc = getSceneBackgroundSrc(scene);
+  if (finalBackgroundSrc === backgroundSrc || Boolean(finalBackgroundSrc)) {
+    return {
+      applied: true,
+      finalBackgroundSrc
+    };
+  }
+
+  // Attempt 2: v14+ level background path.
+  const primaryLevel = getPrimarySceneLevel(scene);
+  if (primaryLevel?.update) {
+    await primaryLevel.update({
+      "background.src": backgroundSrc
+    });
+    finalBackgroundSrc = getSceneBackgroundSrc(scene);
+    if (finalBackgroundSrc === backgroundSrc || Boolean(finalBackgroundSrc)) {
+      return {
+        applied: true,
+        finalBackgroundSrc
+      };
+    }
+  }
+
+  return {
+    applied: false,
+    finalBackgroundSrc
+  };
+}
+
 /**
  * Scene sizes are expressed in grid cells.
  * Foundry stores scene dimensions in pixels.
@@ -1297,15 +1347,10 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         return;
       }
 
-      await scene.update({
-        background: {
-          src: persistedBackgroundPath
-        }
-      });
-      const updatedBackgroundSrc = getSceneBackgroundSrc(scene);
+      const backgroundApplyResult = await applyBackgroundToScene(scene, persistedBackgroundPath);
+      const updatedBackgroundSrc = backgroundApplyResult.finalBackgroundSrc;
       debugLog("Scene background after update", updatedBackgroundSrc);
-      backgroundVerified = Boolean(persistedBackgroundPath)
-        && (updatedBackgroundSrc === persistedBackgroundPath || Boolean(updatedBackgroundSrc));
+      backgroundVerified = Boolean(persistedBackgroundPath) && backgroundApplyResult.applied;
 
       if (!backgroundVerified && (activeProvider === "openai" || activeProvider === "subscription")) {
         await scene.delete();
