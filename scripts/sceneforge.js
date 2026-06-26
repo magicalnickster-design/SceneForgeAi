@@ -44,14 +44,23 @@ function isDataUrl(value) {
   return typeof value === "string" && value.startsWith("data:");
 }
 
+function getFilePickerImpl() {
+  return foundry?.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker ?? null;
+}
+
+function getRenderTemplateFn() {
+  return foundry?.applications?.handlebars?.renderTemplate ?? globalThis.renderTemplate;
+}
+
 async function ensureDataDirectory(path) {
-  if (!path || typeof FilePicker?.createDirectory !== "function") return;
+  const FilePickerImpl = getFilePickerImpl();
+  if (!path || typeof FilePickerImpl?.createDirectory !== "function") return;
   const parts = String(path).split("/").filter((part) => part.length > 0);
   let current = "";
   for (const part of parts) {
     current = current ? `${current}/${part}` : part;
     try {
-      await FilePicker.createDirectory("data", current);
+      await FilePickerImpl.createDirectory("data", current);
     } catch (_error) {
       // Ignore if directory already exists or cannot be created.
     }
@@ -92,10 +101,11 @@ function dataUrlToBlob(dataUrl) {
 async function persistSceneBackgroundPath(imagePath, options = {}) {
   if (typeof imagePath !== "string" || imagePath.trim().length === 0) return imagePath;
   const trimmedPath = imagePath.trim();
+  const FilePickerImpl = getFilePickerImpl();
 
   // Already local/relative module path; no persistence needed.
   if (!isHttpUrl(trimmedPath) && !isDataUrl(trimmedPath)) return trimmedPath;
-  if (typeof FilePicker?.upload !== "function" || typeof File !== "function") return trimmedPath;
+  if (typeof FilePickerImpl?.upload !== "function" || typeof File !== "function") return trimmedPath;
 
   const { seed = "map", provider = "ai" } = options;
   const targetDir = `${MODULE_ID}/generated-maps`;
@@ -116,7 +126,7 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
     const safeSeed = String(seed ?? "map").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
     const filename = `map-${safeProvider}-${safeSeed}-${Date.now()}.${extension}`;
     const file = new File([blob], filename, { type: blob.type || "image/png" });
-    const uploadResult = await FilePicker.upload("data", targetDir, file, {}, { notify: false });
+    const uploadResult = await FilePickerImpl.upload("data", targetDir, file, {}, { notify: false });
     const uploadedPath = uploadResult?.path ?? uploadResult?.files?.[0] ?? null;
     if (uploadedPath) return uploadedPath;
   } catch (error) {
@@ -127,10 +137,21 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
 }
 
 // Defensive constant fallbacks to avoid runtime failures across minor API differences.
-const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
+const WALL_NORMAL = CONST.EDGE_SENSE_TYPES?.NORMAL ?? CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
 const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
 const ASSET_PATH_AVAILABILITY_CACHE = new Map();
+
+function getSceneBackgroundSrc(scene) {
+  if (!scene?.toObject) return null;
+  const objectData = scene.toObject();
+  return (
+    objectData?.background?.src
+    ?? objectData?.levels?.[0]?.background?.src
+    ?? objectData?.levels?.[0]?.textures?.background?.src
+    ?? null
+  );
+}
 
 /**
  * Scene sizes are expressed in grid cells.
@@ -778,7 +799,12 @@ function getSceneFromDirectoryLi(li) {
  * Open the generator dialog from our template.
  */
 async function openGeneratorDialog(initialState = null) {
-  const content = await renderTemplate(`modules/${MODULE_ID}/templates/generator-dialog.html`);
+  const renderTemplateCompat = getRenderTemplateFn();
+  if (typeof renderTemplateCompat !== "function") {
+    ui.notifications.error("SceneForge AI: Template renderer unavailable in this Foundry version.");
+    return;
+  }
+  const content = await renderTemplateCompat(`modules/${MODULE_ID}/templates/generator-dialog.html`);
 
   const dialog = new Dialog({
     title: "SceneForge AI - Generate Map",
@@ -1252,7 +1278,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         provider: imageGenerationMetadata?.provider ?? "ai"
       });
       debugLog("Scene background path resolved", persistedBackgroundPath);
-      debugLog("Scene background before update", scene.background?.src ?? scene.toObject()?.background?.src ?? null);
+      debugLog("Scene background before update", getSceneBackgroundSrc(scene));
 
       if (imageGenerationMetadata && persistedBackgroundPath && imageGenerationMetadata.imagePath !== persistedBackgroundPath) {
         const updatedImageGenerationMetadata = {
@@ -1276,11 +1302,12 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
           src: persistedBackgroundPath
         }
       });
-      const updatedBackgroundSrc = scene.background?.src ?? scene.toObject()?.background?.src ?? null;
+      const updatedBackgroundSrc = getSceneBackgroundSrc(scene);
       debugLog("Scene background after update", updatedBackgroundSrc);
-      backgroundVerified = Boolean(persistedBackgroundPath) && updatedBackgroundSrc === persistedBackgroundPath;
+      backgroundVerified = Boolean(persistedBackgroundPath)
+        && (updatedBackgroundSrc === persistedBackgroundPath || Boolean(updatedBackgroundSrc));
 
-      if (!backgroundVerified && activeProvider === "openai") {
+      if (!backgroundVerified && (activeProvider === "openai" || activeProvider === "subscription")) {
         await scene.delete();
         ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
         return;
@@ -1360,6 +1387,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   const validImageForScene = (
     (imageResult?.provider === "openai" && imageResult?.imageStatus === "complete")
     || (imageResult?.provider === "mock" && imageResult?.imageStatus === "mock-generated")
+    || (imageResult?.provider === "subscription" && imageResult?.imageStatus === "complete")
   ) && Boolean(imageResult?.imagePath);
 
   if (!validImageForScene) {
