@@ -19,6 +19,8 @@ const DEBUG = false;
 const TILE_FALLBACK_MODE = "skip-missing";
 // Temporary product-focus switch: disable all spawned tile/prop/pack assets.
 const ENABLE_ASSET_SPAWNING = false;
+// Test isolation switch: disable all SceneForge journals and notes.
+const ENABLE_JOURNALS_AND_NOTES = false;
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -578,6 +580,10 @@ async function safeSceneCreate(payload, contextLabel = "Scene.create") {
 }
 
 async function safeJournalEntryCreate(payload, contextLabel = "JournalEntry.create") {
+  if (!ENABLE_JOURNALS_AND_NOTES) {
+    debugLog(`${contextLabel} skipped (journals disabled).`);
+    return null;
+  }
   try {
     debugPayload(contextLabel, payload);
     const sanitized = sanitizeDocumentPayload("JournalEntry", payload);
@@ -591,6 +597,10 @@ async function safeJournalEntryCreate(payload, contextLabel = "JournalEntry.crea
 }
 
 async function safeEmbeddedCreate(scene, documentName, payloadArray, contextLabel) {
+  if (!ENABLE_JOURNALS_AND_NOTES && documentName === "Note") {
+    debugLog(`${contextLabel} skipped (notes disabled).`);
+    return [];
+  }
   try {
     debugPayload(contextLabel, payloadArray);
     const sanitized = sanitizeDocumentPayload(documentName, payloadArray);
@@ -909,7 +919,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.16.2"
+    moduleVersion: "0.16.4"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1984,7 +1994,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.16.2",
+    version: generationData.moduleVersion ?? "0.16.4",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-planner",
@@ -2127,7 +2137,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.16.2"
+    moduleVersion: "0.16.4"
   };
 
   return {
@@ -2443,7 +2453,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers,
     seed,
-    moduleVersion: "0.16.2",
+    moduleVersion: "0.16.4",
     lastGeneratedAt: Date.now()
   });
 
