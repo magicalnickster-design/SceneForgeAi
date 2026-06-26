@@ -189,20 +189,34 @@ function registerAssetPackSettings() {
  *  2) register a module setting toggle
  *  3) include the registry in this function when toggle is enabled
  */
-function getActiveAssetRegistry() {
+function getActiveAssetRegistry(forcedEnabledPackIds = null) {
   const merged = cloneRegistryWithPackMeta(baseRegistry, "base");
 
-  if (game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK)) {
+  if (isAssetPackEnabled("premium-tavern", forcedEnabledPackIds)) {
     mergeRegistryInto(merged, cloneRegistryWithPackMeta(premiumTavernRegistry, "premium-tavern"));
   }
-  if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) {
+  if (isAssetPackEnabled("dark-dungeon", forcedEnabledPackIds)) {
     mergeRegistryInto(merged, cloneRegistryWithPackMeta(darkDungeonRegistry, "dark-dungeon"));
   }
-  if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) {
+  if (isAssetPackEnabled("rune-ruins", forcedEnabledPackIds)) {
     mergeRegistryInto(merged, cloneRegistryWithPackMeta(runeRuinsRegistry, "rune-ruins"));
   }
 
   return merged;
+}
+
+/**
+ * Supports either explicit pack IDs (preset import) or world settings toggles.
+ */
+function isAssetPackEnabled(packId, forcedEnabledPackIds) {
+  if (Array.isArray(forcedEnabledPackIds)) {
+    return forcedEnabledPackIds.includes(packId);
+  }
+
+  if (packId === "premium-tavern") return game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK);
+  if (packId === "dark-dungeon") return game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK);
+  if (packId === "rune-ruins") return game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK);
+  return false;
 }
 
 /**
@@ -278,6 +292,30 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
       const scene = getSceneFromDirectoryLi(li);
       if (!scene) return;
       await regenerateSceneFromFlags(scene);
+    }
+  });
+
+  entryOptions.push({
+    name: "SceneForge: Export Preset",
+    icon: '<i class="fas fa-file-export"></i>',
+    condition: (li) => {
+      if (!game.user?.isGM) return false;
+      const scene = getSceneFromDirectoryLi(li);
+      return Boolean(scene?.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
+    },
+    callback: async (li) => {
+      const scene = getSceneFromDirectoryLi(li);
+      if (!scene) return;
+      await exportScenePreset(scene);
+    }
+  });
+
+  entryOptions.push({
+    name: "SceneForge: Import Preset",
+    icon: '<i class="fas fa-file-import"></i>',
+    condition: () => game.user?.isGM === true,
+    callback: async () => {
+      await promptImportPresetFile();
     }
   });
 });
@@ -432,7 +470,7 @@ async function handleGenerate(dialogHtml) {
     effectiveDetected,
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.6.0"
+    moduleVersion: "0.7.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -635,6 +673,254 @@ async function regenerateSceneFromFlags(scene) {
 }
 
 /**
+ * Export a generated SceneForge scene as a reusable JSON preset file.
+ */
+async function exportScenePreset(scene) {
+  const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
+  if (!generationData) {
+    ui.notifications.warn("SceneForge AI: This scene has no SceneForge generation data to export.");
+    return;
+  }
+
+  const preset = buildScenePresetPayload(scene, generationData);
+  const filename = `sceneforge-preset-${slugifyFilename(scene.name)}.json`;
+  downloadJsonFile(preset, filename);
+  ui.notifications.info(`SceneForge AI: Exported preset "${filename}".`);
+}
+
+/**
+ * Ask user for a preset JSON file, validate it, and generate a new scene from it.
+ */
+async function promptImportPresetFile() {
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = ".json,application/json";
+
+  fileInput.addEventListener("change", async () => {
+    try {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+
+      const text = await file.text();
+      let rawPreset;
+      try {
+        rawPreset = JSON.parse(text);
+      } catch (_error) {
+        ui.notifications.error("SceneForge AI: Invalid preset JSON. Could not parse file.");
+        return;
+      }
+
+      const validation = validateImportedPreset(rawPreset);
+      if (!validation.ok) {
+        ui.notifications.error(`SceneForge AI: Invalid preset - ${validation.error}`);
+        return;
+      }
+
+      await importPresetAsNewScene(validation.generationData, validation.sourceVersion);
+      ui.notifications.info("SceneForge AI: Preset imported successfully.");
+    } catch (error) {
+      console.error(`${MODULE_ID} | Preset import failed`, error);
+      ui.notifications.error("SceneForge AI: Failed to import preset. See console for details.");
+    }
+  });
+
+  fileInput.click();
+}
+
+/**
+ * Build a portable preset payload that can be shared or published.
+ */
+function buildScenePresetPayload(scene, generationData) {
+  return {
+    presetType: "SceneForgePreset",
+    presetSchemaVersion: "1.0.0",
+    version: generationData.moduleVersion ?? "0.7.0",
+    exportedAt: new Date().toISOString(),
+    sceneName: scene.name,
+    prompt: generationData.prompt,
+    theme: generationData.theme,
+    size: generationData.sceneSizeKey,
+    sceneSizeKey: generationData.sceneSizeKey,
+    seed: generationData.seed,
+    lightingMood: generationData.lightingMood ?? "dim",
+    detected: generationData.detected ?? null,
+    detectedFeatures: generationData.detected?.features ?? null,
+    useDetectedSettings: generationData.useDetectedSettings !== false,
+    enabledAssetPacks: Array.isArray(generationData.enabledAssetPacks) ? generationData.enabledAssetPacks : [],
+    generationLayers: generationData.generationLayers ?? ["walls", "floor-assets", "props", "lighting", "notes"],
+    generationMetadata: collectGeneratedDocumentMetadata(scene),
+    generationData
+  };
+}
+
+/**
+ * Capture generated wall/tile/light/note metadata for export debugging and sharing.
+ */
+function collectGeneratedDocumentMetadata(scene) {
+  const mapGeneratedDocs = (collection, mapper) => collection
+    .filter((doc) => doc.getFlag(MODULE_ID, FLAG_GENERATED_KEY) === true)
+    .map(mapper);
+
+  return {
+    walls: mapGeneratedDocs(scene.walls, (doc) => ({
+      c: doc.c,
+      flags: doc.flags?.[MODULE_ID] ?? {}
+    })),
+    tiles: mapGeneratedDocs(scene.tiles, (doc) => ({
+      x: doc.x,
+      y: doc.y,
+      width: doc.width,
+      height: doc.height,
+      src: doc.texture?.src ?? "",
+      flags: doc.flags?.[MODULE_ID] ?? {}
+    })),
+    lights: mapGeneratedDocs(scene.lights, (doc) => ({
+      x: doc.x,
+      y: doc.y,
+      config: {
+        bright: doc.config?.bright,
+        dim: doc.config?.dim,
+        color: doc.config?.color,
+        animation: doc.config?.animation?.type ?? "none"
+      },
+      flags: doc.flags?.[MODULE_ID] ?? {}
+    })),
+    notes: mapGeneratedDocs(scene.notes, (doc) => ({
+      x: doc.x,
+      y: doc.y,
+      text: doc.text ?? "",
+      flags: doc.flags?.[MODULE_ID] ?? {}
+    }))
+  };
+}
+
+/**
+ * Validate imported JSON and normalize it into generationData shape.
+ */
+function validateImportedPreset(rawPreset) {
+  if (!rawPreset || typeof rawPreset !== "object") {
+    return { ok: false, error: "Preset must be a JSON object." };
+  }
+
+  const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
+  const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
+  const theme = String(rawPreset.theme ?? rawPreset.generationData?.theme ?? "").trim();
+  const sceneSizeKey = String(rawPreset.size ?? rawPreset.sceneSizeKey ?? rawPreset.generationData?.sceneSizeKey ?? "").trim();
+  const seed = String(rawPreset.seed ?? rawPreset.generationData?.seed ?? "").trim();
+  const lightingMood = String(rawPreset.lightingMood ?? rawPreset.generationData?.lightingMood ?? "dim");
+
+  if (!prompt) return { ok: false, error: "Missing prompt." };
+  if (!Object.prototype.hasOwnProperty.call(THEME_LABELS, theme)) {
+    return { ok: false, error: `Invalid theme "${theme}".` };
+  }
+  if (!Object.prototype.hasOwnProperty.call(SCENE_SIZES, sceneSizeKey)) {
+    return { ok: false, error: `Invalid size "${sceneSizeKey}".` };
+  }
+  if (!seed) return { ok: false, error: "Missing seed." };
+  if (!Object.prototype.hasOwnProperty.call(LIGHTING_MOOD_LABELS, lightingMood)) {
+    return { ok: false, error: `Invalid lighting mood "${lightingMood}".` };
+  }
+
+  const detected = rawPreset.detected
+    ?? rawPreset.generationData?.detected
+    ?? parsePromptForSceneSettings(prompt);
+
+  const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
+  const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
+
+  const generationData = {
+    prompt,
+    sceneSizeKey,
+    theme,
+    lightingMood,
+    detected,
+    useDetectedSettings: useDetectedSettings !== false,
+    effectiveDetected: (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected),
+    enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
+    generationLayers: Array.isArray(rawPreset.generationLayers)
+      ? rawPreset.generationLayers
+      : ["walls", "floor-assets", "props", "lighting", "notes"],
+    seed,
+    moduleVersion: "0.7.0"
+  };
+
+  return {
+    ok: true,
+    sourceVersion,
+    generationData
+  };
+}
+
+/**
+ * Create a new scene from normalized preset data and generate full layout.
+ */
+async function importPresetAsNewScene(generationData, sourceVersion = "unknown") {
+  const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
+  const widthPx = gridCells * GRID_SIZE_PX;
+  const heightPx = gridCells * GRID_SIZE_PX;
+  const sceneName = `SceneForge Preset - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
+
+  const scene = await Scene.create({
+    name: sceneName,
+    width: widthPx,
+    height: heightPx,
+    padding: 0.1,
+    grid: {
+      type: CONST.GRID_TYPES.SQUARE,
+      size: GRID_SIZE_PX,
+      distance: 5,
+      units: "ft"
+    },
+    backgroundColor: "#2b2b2b",
+    navigation: true,
+    flags: {
+      [MODULE_ID]: {
+        [FLAG_GENERATION_KEY]: {
+          ...generationData,
+          importedFromPresetVersion: sourceVersion
+        }
+      }
+    }
+  });
+
+  if (!scene) {
+    throw new Error("Failed to create scene during preset import.");
+  }
+
+  await generateSceneLayout(scene, generationData);
+}
+
+/**
+ * Download helper that supports Foundry's saveDataToFile utility.
+ */
+function downloadJsonFile(data, filename) {
+  const jsonText = JSON.stringify(data, null, 2);
+  if (typeof saveDataToFile === "function") {
+    saveDataToFile(jsonText, "application/json", filename);
+    return;
+  }
+
+  const blob = new Blob([jsonText], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Convert scene names into safe filenames.
+ */
+function slugifyFilename(name) {
+  return String(name ?? "scene")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 80) || "scene";
+}
+
+/**
  * Core generation pipeline used by both first-time generation and regeneration.
  * Steps:
  *   1) Normalize data and update scene dimensions/grid
@@ -677,7 +963,10 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
 
   const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
-  const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected);
+  const activePackIds = Array.isArray(generationData.enabledAssetPacks)
+    ? generationData.enabledAssetPacks
+    : getEnabledAssetPackIds();
+  const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -784,10 +1073,10 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     detected,
     useDetectedSettings,
     effectiveDetected,
-    enabledAssetPacks: getEnabledAssetPackIds(),
+    enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.6.0",
+    moduleVersion: "0.7.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -1092,9 +1381,9 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected) {
  * Build floor + prop tiles using modular registry rules.
  * This is intentionally data-driven so future premium packs can swap sources.
  */
-function buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, detected) {
+function buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, detected, enabledPackIds = null) {
   const registryThemeKey = normalizeThemeToRegistryKey(theme);
-  const activeRegistry = getActiveAssetRegistry();
+  const activeRegistry = getActiveAssetRegistry(enabledPackIds);
   const assetEntries = activeRegistry[registryThemeKey] ?? [];
   const contexts = buildPlacementContexts(registryThemeKey, widthPx, heightPx);
   const occupied = [];
