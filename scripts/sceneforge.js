@@ -1266,17 +1266,27 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/images/generations", {
+    const endpoint = "https://api.openai.com/v1/images/generations";
+    const requestPayload = {
+      model: "gpt-image-1",
+      prompt: compiledPrompt,
+      size: "1024x1024"
+    };
+    debugLog("OpenAI request payload validated");
+    debugLog("OpenAI request metadata", {
+      endpoint,
+      method: "POST",
+      authorization: "Bearer <redacted>"
+    });
+    debugLog("OpenAI request payload", requestPayload);
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: "gpt-image-1",
-        prompt: compiledPrompt,
-        size: "1024x1024"
-      })
+      body: JSON.stringify(requestPayload)
     });
 
     if (!response.ok) {
