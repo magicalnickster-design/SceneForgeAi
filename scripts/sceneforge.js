@@ -75,6 +75,56 @@ const FEATURE_KEYS = [
   "cells"
 ];
 
+const AI_PLANNER_BIOMES = [
+  "jungle",
+  "forest",
+  "desert",
+  "snow",
+  "swamp",
+  "cave",
+  "underground",
+  "coastal",
+  "mountain",
+  "volcanic"
+];
+
+const AI_PLANNER_THEMES = [
+  "ruins",
+  "temple",
+  "dungeon",
+  "tavern",
+  "castle",
+  "crypt",
+  "village",
+  "camp",
+  "fortress",
+  "sewer"
+];
+
+const AI_PLANNER_TERRAIN_FEATURES = [
+  "river",
+  "bridge",
+  "waterfall",
+  "lava",
+  "cliffs",
+  "road",
+  "pond",
+  "lake",
+  "trees",
+  "pillars",
+  "altar",
+  "treasure",
+  "hidden room",
+  "side rooms",
+  "boss room",
+  "puzzle room",
+  "prison cells",
+  "market stalls",
+  "docks"
+];
+
+const AI_PLANNER_LIGHTING_MOODS = ["bright", "dim", "dark", "magical", "torchlit"];
+
 /**
  * Settings keys for optional premium-style asset packs.
  * Base assets are always included and do not need a setting.
@@ -452,6 +502,7 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
  */
 function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
+  if (typeof state.generationMode === "string") form.find('[name="generationMode"]').val(state.generationMode);
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.sceneSizeKey === "string") form.find('[name="sceneSize"]').val(state.sceneSizeKey);
   if (typeof state.theme === "string") form.find('[name="theme"]').val(state.theme);
@@ -505,6 +556,7 @@ async function handleGenerate(dialogHtml) {
  * Build normalized generation config from generator dialog inputs.
  */
 function buildGenerationConfigFromForm(form) {
+  const generationMode = String(form.find('[name="generationMode"]').val() ?? "procedural");
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
   let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
@@ -519,27 +571,46 @@ function buildGenerationConfigFromForm(form) {
   }
 
   const detected = parsePromptForSceneSettings(prompt);
-  if (useDetectedSettings) {
+  if (generationMode === "procedural" && useDetectedSettings) {
     theme = detected.theme;
     sceneSizeKey = detected.suggestedSize;
     lightingMood = detected.lightingMood;
   }
 
+  let aiPlan = null;
+  let compiledImagePrompt = null;
+  let effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
+
+  if (generationMode === "ai-planner") {
+    aiPlan = parseAiMapPlan(prompt);
+    compiledImagePrompt = compileInkarnatePrompt(aiPlan);
+
+    // AI planner provides the final map intent; map it onto current generator knobs.
+    theme = mapAiPlanThemeToSceneTheme(aiPlan);
+    sceneSizeKey = mapAiPlanSizeToSceneSizeKey(aiPlan.mapSize);
+    lightingMood = mapAiPlanLightingToSceneLighting(aiPlan.lightingMood);
+    effectiveDetected = applyAiPlanFeaturesToDetected(effectiveDetected, aiPlan);
+  }
+
   const generationData = {
+    generationMode,
     prompt,
     sceneSizeKey,
     theme,
     lightingMood,
     detected,
     useDetectedSettings,
-    effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
+    effectiveDetected,
+    aiPlan,
+    compiledImagePrompt,
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.10.3"
+    moduleVersion: "0.11.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
   const formState = {
+    generationMode,
     prompt,
     sceneSizeKey: String(form.find('[name="sceneSize"]').val() ?? "medium"),
     theme: String(form.find('[name="theme"]').val() ?? "dungeon"),
@@ -604,12 +675,16 @@ function buildGenerationPreviewData(config) {
   });
 
   return {
+    generationMode: generationData.generationMode ?? "procedural",
     finalTheme: generationData.theme,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
     lightingMood: generationData.lightingMood,
     appliedFeatures,
     enabledAssetPacks: generationData.enabledAssetPacks,
+    aiPlan: generationData.aiPlan,
+    compiledImagePrompt: generationData.compiledImagePrompt,
+    aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
     estimated: {
       walls: walls.length,
       ambientLights: lights.length,
@@ -679,9 +754,30 @@ async function openGenerationPreviewDialog(config, previewData) {
   const featureImpactHtml = previewData.featureImpact.length > 0
     ? previewData.featureImpact.map((line) => `<li>${foundry.utils.escapeHTML(line)}</li>`).join("")
     : "<li>No special feature impacts detected.</li>";
+  const aiSummaryHtml = previewData.aiReadableSummary
+    ? previewData.aiReadableSummary.map((line) => `<li>${foundry.utils.escapeHTML(line)}</li>`).join("")
+    : "";
+  const aiPlanJsonHtml = previewData.aiPlan
+    ? foundry.utils.escapeHTML(JSON.stringify(previewData.aiPlan, null, 2))
+    : "";
+  const compiledPromptHtml = previewData.compiledImagePrompt
+    ? foundry.utils.escapeHTML(previewData.compiledImagePrompt)
+    : "";
+  const aiPlannerSection = previewData.generationMode === "ai-planner"
+    ? `
+  <hr/>
+  <p><strong>AI Planner Summary</strong></p>
+  <ul>${aiSummaryHtml}</ul>
+  <p><strong>Structured JSON Plan</strong></p>
+  <pre>${aiPlanJsonHtml}</pre>
+  <p><strong>Compiled Image Prompt Preview</strong></p>
+  <pre>${compiledPromptHtml}</pre>
+    `
+    : "";
 
   const content = `
 <div class="sceneforge-preview">
+  <p><strong>Generation Mode:</strong> ${previewData.generationMode === "ai-planner" ? "AI Planner Mode" : "Procedural Mode"}</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
@@ -690,6 +786,7 @@ async function openGenerationPreviewDialog(config, previewData) {
   <ul>${featuresHtml}</ul>
   <p><strong>Enabled Asset Packs:</strong></p>
   <ul>${packsHtml}</ul>
+  ${aiPlannerSection}
   <hr/>
   <p><strong>Estimated Objects</strong></p>
   <p>Walls: ${previewData.estimated.walls} | Ambient Lights: ${previewData.estimated.ambientLights} | Tiles: ${previewData.estimated.floorTiles + previewData.estimated.propTiles} | Notes: ${previewData.estimated.notes}</p>
@@ -1069,15 +1166,18 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.10.3",
+    version: generationData.moduleVersion ?? "0.11.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
+    generationMode: generationData.generationMode ?? "procedural",
     prompt: generationData.prompt,
     theme: generationData.theme,
     size: generationData.sceneSizeKey,
     sceneSizeKey: generationData.sceneSizeKey,
     seed: generationData.seed,
     lightingMood: generationData.lightingMood ?? "dim",
+    aiPlan: generationData.aiPlan ?? null,
+    compiledImagePrompt: generationData.compiledImagePrompt ?? null,
     detected: generationData.detected ?? null,
     detectedFeatures: generationData.detected?.features ?? null,
     useDetectedSettings: generationData.useDetectedSettings !== false,
@@ -1138,6 +1238,7 @@ function validateImportedPreset(rawPreset) {
   }
 
   const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
+  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "procedural");
   const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
   const theme = String(rawPreset.theme ?? rawPreset.generationData?.theme ?? "").trim();
   const sceneSizeKey = String(rawPreset.size ?? rawPreset.sceneSizeKey ?? rawPreset.generationData?.sceneSizeKey ?? "").trim();
@@ -1159,24 +1260,37 @@ function validateImportedPreset(rawPreset) {
   const detected = rawPreset.detected
     ?? rawPreset.generationData?.detected
     ?? parsePromptForSceneSettings(prompt);
+  const aiPlan = rawPreset.aiPlan
+    ?? rawPreset.generationData?.aiPlan
+    ?? (generationMode === "ai-planner" ? parseAiMapPlan(prompt) : null);
+  const compiledImagePrompt = rawPreset.compiledImagePrompt
+    ?? rawPreset.generationData?.compiledImagePrompt
+    ?? (aiPlan ? compileInkarnatePrompt(aiPlan) : null);
 
   const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
   const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
+  const baseDetected = (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected);
+  const effectiveDetected = generationMode === "ai-planner"
+    ? applyAiPlanFeaturesToDetected(baseDetected, aiPlan ?? parseAiMapPlan(prompt))
+    : baseDetected;
 
   const generationData = {
+    generationMode,
     prompt,
     sceneSizeKey,
     theme,
     lightingMood,
     detected,
     useDetectedSettings: useDetectedSettings !== false,
-    effectiveDetected: (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected),
+    effectiveDetected,
+    aiPlan,
+    compiledImagePrompt,
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: Array.isArray(rawPreset.generationLayers)
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.3"
+    moduleVersion: "0.11.0"
   };
 
   return {
@@ -1462,6 +1576,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   }
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
+    generationMode: generationData.generationMode ?? "procedural",
     prompt,
     sceneSizeKey,
     theme,
@@ -1469,10 +1584,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     detected,
     useDetectedSettings,
     effectiveDetected,
+    aiPlan: generationData.aiPlan ?? null,
+    compiledImagePrompt: generationData.compiledImagePrompt ?? null,
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.3",
+    moduleVersion: "0.11.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -2281,6 +2398,198 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 <p><strong>Generation Mode:</strong> ${isRegeneration ? "Regenerated from scene flags" : "Initial generation"}</p>
 <p>This layout is deterministic and local-only. No external AI API calls are used.</p>
   `.trim();
+}
+
+/**
+ * Parse an "AI planner" map plan from natural language using local rules only.
+ * No external APIs are called.
+ */
+function parseAiMapPlan(prompt) {
+  const text = String(prompt ?? "").toLowerCase();
+  const has = (phrase) => text.includes(phrase);
+  const matched = (keywords) => keywords.filter((k) => has(k));
+
+  const matchedBiomes = matched(AI_PLANNER_BIOMES);
+  const matchedThemes = matched(AI_PLANNER_THEMES);
+  const matchedTerrain = matched(AI_PLANNER_TERRAIN_FEATURES);
+  const matchedLighting = matched(AI_PLANNER_LIGHTING_MOODS);
+
+  const biome = matchedBiomes[0] ?? "forest";
+  const themeRoot = matchedThemes[0] ?? "ruins";
+  const theme = `${biome}_${themeRoot}`;
+
+  const roomCountHint = detectCountFromPrompt(text, ["rooms", "room"], 0);
+  const sideRoomCount = detectCountFromPrompt(text, ["side rooms", "side room"], has("side room") ? 2 : 0);
+
+  const rooms = [];
+  if (has("boss room")) {
+    rooms.push({ type: "boss_room", position: detectDirectionalPosition(text, "boss room", "north") });
+  }
+  if (sideRoomCount > 0 || has("side room")) {
+    rooms.push({ type: "side_room", count: Math.max(1, sideRoomCount || 2) });
+  }
+  if (has("hidden room")) {
+    rooms.push({ type: "hidden_room", position: detectDirectionalPosition(text, "hidden room", "east") });
+  }
+  if (has("puzzle room")) {
+    rooms.push({ type: "puzzle_room", position: detectDirectionalPosition(text, "puzzle room", "west") });
+  }
+
+  const baseRoomCount = roomCountHint > 0 ? roomCountHint : 3;
+  const roomCount = Math.max(
+    baseRoomCount,
+    rooms.reduce((sum, room) => sum + (Number(room.count) || 1), 0)
+  );
+
+  const mapSize = roomCount >= 6 || matchedTerrain.length >= 5 ? "large" : (roomCount <= 2 ? "small" : "medium");
+  const estimatedGrid = {
+    small: "30x30",
+    medium: "50x50",
+    large: "70x70"
+  }[mapSize] ?? "50x50";
+
+  const lightingMood = matchedLighting[0] ?? (has("torch") || has("torches") ? "torchlit" : "dim");
+  const terrainFeatures = dedupeKeywords(matchedTerrain);
+  const compositionNotes = buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood });
+
+  return {
+    theme,
+    biome,
+    style: "inkarnate",
+    mapSize,
+    estimatedGrid,
+    roomCount,
+    rooms,
+    terrainFeatures,
+    lightingMood,
+    compositionNotes
+  };
+}
+
+/**
+ * Compile a strict future-facing image prompt using the AI planner output.
+ * This is preview-only text now; no external image generation is called.
+ */
+function compileInkarnatePrompt(plan) {
+  const roomSummary = plan.rooms.map((room) => {
+    const position = room.position ? ` at ${room.position}` : "";
+    const count = room.count ? ` x${room.count}` : "";
+    return `${room.type}${count}${position}`;
+  }).join(", ");
+
+  const terrainSummary = plan.terrainFeatures.join(", ") || "none";
+  const noteSummary = plan.compositionNotes.join("; ") || "balanced composition";
+
+  return `
+TRUE TOP DOWN VTT BATTLE MAP.
+90 DEGREE ORTHOGRAPHIC CAMERA.
+GRIDLESS.
+INKARNATE STYLE.
+HIGH DETAIL HAND PAINTED FANTASY MAP.
+NO CHARACTERS.
+NO TEXT.
+NO LABELS.
+NO ISOMETRIC.
+NO PERSPECTIVE CAMERA.
+Biome: ${plan.biome}.
+Theme: ${plan.theme}.
+Map size: ${plan.mapSize} (${plan.estimatedGrid}).
+Lighting mood: ${plan.lightingMood}.
+Rooms: ${roomSummary || "none"}.
+Terrain features: ${terrainSummary}.
+Composition: ${noteSummary}.
+  `.trim();
+}
+
+/**
+ * Map AI planner theme output into SceneForge's current supported themes.
+ */
+function mapAiPlanThemeToSceneTheme(plan) {
+  const themeText = `${plan.theme} ${plan.biome}`.toLowerCase();
+  if (themeText.includes("tavern") || themeText.includes("village") || themeText.includes("camp")) return "tavern";
+  if (themeText.includes("cave") || themeText.includes("underground") || themeText.includes("sewer")) return "cave";
+  if (themeText.includes("forest") || themeText.includes("jungle") || themeText.includes("ruins") || themeText.includes("temple")) return "forest-ruins";
+  return "dungeon";
+}
+
+function mapAiPlanSizeToSceneSizeKey(mapSize) {
+  if (mapSize === "small" || mapSize === "large" || mapSize === "medium") return mapSize;
+  return "medium";
+}
+
+function mapAiPlanLightingToSceneLighting(lightingMood) {
+  if (["bright", "dim", "dark", "magical"].includes(lightingMood)) return lightingMood;
+  if (lightingMood === "torchlit") return "dim";
+  return "dim";
+}
+
+/**
+ * Apply AI plan room/terrain hints into existing feature toggles.
+ */
+function applyAiPlanFeaturesToDetected(detected, plan) {
+  const clone = foundry.utils.deepClone(detected ?? parsePromptForSceneSettings(""));
+  const roomTypes = (plan.rooms ?? []).map((room) => room.type);
+  const terrain = plan.terrainFeatures ?? [];
+
+  clone.features.bossRoom = clone.features.bossRoom || roomTypes.includes("boss_room");
+  clone.features.hiddenRoom = clone.features.hiddenRoom || roomTypes.includes("hidden_room") || terrain.includes("hidden room");
+  clone.features.sideRooms = clone.features.sideRooms || roomTypes.includes("side_room") || terrain.includes("side rooms");
+  const plannedSideRoom = plan.rooms.find((room) => room.type === "side_room");
+  if (plannedSideRoom?.count) clone.features.sideRoomsCount = Number(plannedSideRoom.count);
+  clone.features.pillars = clone.features.pillars || terrain.includes("pillars");
+  clone.features.altar = clone.features.altar || terrain.includes("altar");
+  clone.features.treasure = clone.features.treasure || terrain.includes("treasure");
+  clone.features.cells = clone.features.cells || terrain.includes("prison cells");
+
+  return clone;
+}
+
+/**
+ * Human-readable AI plan bullet summary for preview mode.
+ */
+function buildAiPlanReadableSummary(plan) {
+  const terrainSummary = plan.terrainFeatures.length > 0 ? plan.terrainFeatures.join(", ") : "none";
+  const roomSummary = plan.rooms.length > 0
+    ? plan.rooms.map((room) => room.count ? `${room.type} x${room.count}` : room.type).join(", ")
+    : "none";
+  return [
+    `Biome: ${plan.biome}`,
+    `Theme: ${plan.theme}`,
+    `Style: ${plan.style}`,
+    `Map Size: ${plan.mapSize} (${plan.estimatedGrid})`,
+    `Room Count: ${plan.roomCount}`,
+    `Lighting Mood: ${plan.lightingMood}`,
+    `Rooms: ${roomSummary}`,
+    `Terrain: ${terrainSummary}`
+  ];
+}
+
+function buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood }) {
+  const notes = [];
+  if (terrainFeatures.includes("river")) notes.push("river runs through center");
+  if (rooms.some((room) => room.type === "boss_room")) notes.push("boss room in northern section");
+  if (rooms.some((room) => room.type === "side_room")) notes.push("side rooms east and west");
+  if (terrainFeatures.includes("bridge")) notes.push("bridge connects key traversal points");
+  if (terrainFeatures.includes("hidden room")) notes.push("hidden chamber tucked off main route");
+  if (notes.length === 0) {
+    notes.push(`${biome} composition with ${lightingMood} mood and readable encounter flow`);
+  }
+  if (text.includes("center")) notes.push("center area should host a major focal set piece");
+  return dedupeKeywords(notes);
+}
+
+function detectDirectionalPosition(text, subject, fallback = "center") {
+  const index = text.indexOf(subject);
+  if (index === -1) return fallback;
+  const windowStart = Math.max(0, index - 40);
+  const windowEnd = Math.min(text.length, index + subject.length + 40);
+  const segment = text.slice(windowStart, windowEnd);
+  if (segment.includes("north")) return "north";
+  if (segment.includes("south")) return "south";
+  if (segment.includes("east")) return "east";
+  if (segment.includes("west")) return "west";
+  if (segment.includes("center")) return "center";
+  return fallback;
 }
 
 /**
