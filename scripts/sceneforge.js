@@ -2458,6 +2458,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const detected = generationData.detected ?? parsePromptForSceneSettings(prompt);
   const useDetectedSettings = generationData.useDetectedSettings !== false;
   const effectiveDetected = generationData.effectiveDetected ?? (useDetectedSettings ? detected : buildDisabledDetectedPayload(detected));
+  const isAiPlannerMode = generationData?.generationMode === "ai-planner";
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
@@ -2480,7 +2481,11 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   // Same seed + same options => same pseudo-random sequence => same layout.
   const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
 
-  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
+  // AI image mode should not add procedural wall overlays that may conflict
+  // with prompt fidelity or perspective in generated artwork.
+  const walls = isAiPlannerMode
+    ? []
+    : buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
   const activePackIds = Array.isArray(generationData.enabledAssetPacks)
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
@@ -2489,7 +2494,9 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
     validatedTiles = await applyTileFallbackModeToTileLayers(tileLayers);
   }
-  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
+  const lights = isAiPlannerMode
+    ? []
+    : buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
   // 1) walls
@@ -3444,14 +3451,49 @@ function parseAiMapPlan(prompt) {
   const text = String(prompt ?? "").toLowerCase();
   const has = (phrase) => text.includes(phrase);
   const matched = (keywords) => keywords.filter((k) => has(k));
+  const scoreKeywordGroup = (keywordGroups) => {
+    const entries = Object.entries(keywordGroups).map(([key, keywords]) => {
+      const hits = keywords.filter((k) => has(k));
+      return { key, hits, score: hits.length };
+    });
+    entries.sort((a, b) => b.score - a.score);
+    return entries[0];
+  };
 
-  const matchedBiomes = matched(AI_PLANNER_BIOMES);
-  const matchedThemes = matched(AI_PLANNER_THEMES);
+  const biomeKeywords = {
+    coastal: ["beach", "ocean", "shore", "shoreline", "coast", "coastal", "seaside", "bay", "island", "sand"],
+    forest: ["forest", "woods", "woodland", "grove", "pine", "tree line"],
+    jungle: ["jungle", "rainforest", "tropical"],
+    desert: ["desert", "dune", "arid", "mesa", "canyon", "wasteland"],
+    snow: ["snow", "tundra", "ice", "icy", "frozen", "glacier", "arctic"],
+    swamp: ["swamp", "marsh", "bog", "wetland", "mire"],
+    cave: ["cave", "cavern", "grotto"],
+    underground: ["underground", "subterranean", "catacomb", "underworld"],
+    mountain: ["mountain", "highland", "peak", "cliffside", "alpine"],
+    volcanic: ["volcanic", "volcano", "lava", "magma", "ash field"]
+  };
+  const themeKeywords = {
+    temple: ["temple", "sanctum", "shrine"],
+    ruins: ["ruins", "ruined", "collapsed", "ancient ruin"],
+    dungeon: ["dungeon", "crypt", "catacomb", "fortress", "stronghold"],
+    tavern: ["tavern", "inn", "alehouse", "pub"],
+    castle: ["castle", "keep", "citadel"],
+    village: ["village", "hamlet", "town"],
+    camp: ["camp", "encampment", "outpost"],
+    sewer: ["sewer", "drain", "cistern"],
+    wilderness: ["road", "path", "trail", "crossroads", "coastline", "shore", "beach", "forest", "desert", "swamp", "mountain"]
+  };
+
+  const bestBiome = scoreKeywordGroup(biomeKeywords);
+  const bestTheme = scoreKeywordGroup(themeKeywords);
+
+  const matchedBiomes = bestBiome?.score > 0 ? bestBiome.hits : [];
+  const matchedThemes = bestTheme?.score > 0 ? bestTheme.hits : [];
   const matchedTerrain = matched(AI_PLANNER_TERRAIN_FEATURES);
   const matchedLighting = matched(AI_PLANNER_LIGHTING_MOODS);
 
-  const biome = matchedBiomes[0] ?? "forest";
-  const themeRoot = matchedThemes[0] ?? "ruins";
+  const biome = bestBiome?.score > 0 ? bestBiome.key : "temperate";
+  const themeRoot = bestTheme?.score > 0 ? bestTheme.key : "wilderness";
   const theme = `${biome}_${themeRoot}`;
 
   const roomCountHint = detectCountFromPrompt(text, ["rooms", "room"], 0);
@@ -3491,6 +3533,7 @@ function parseAiMapPlan(prompt) {
   return {
     theme,
     biome,
+    sourcePrompt: String(prompt ?? "").trim(),
     style: "inkarnate",
     mapSize,
     estimatedGrid,
@@ -3608,6 +3651,9 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
   }).join(", ");
 
   const terrainType = (() => {
+    if (themeText.includes("coastal") || themeText.includes("beach") || themeText.includes("ocean") || themeText.includes("shore")) {
+      return "coastal shoreline terrain with sandy beach, packed wet sand near waterline, and natural dune transitions";
+    }
     if (themeText.includes("forest") || themeText.includes("jungle")) return "lush forest floor with ancient ruin stonework";
     if (themeText.includes("desert")) return "sun-baked sand, weathered flagstones, and dusty rock shelves";
     if (themeText.includes("swamp")) return "muddy wetland ground with mossy roots and saturated soil";
@@ -3618,6 +3664,9 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
   })();
 
   const vegetationDensity = (() => {
+    if (themeText.includes("coastal") || themeText.includes("beach") || themeText.includes("shore")) {
+      return "sparse dune grass, occasional coastal shrubs, and open sandy play spaces";
+    }
     if (themeText.includes("forest") || themeText.includes("jungle")) return "dense mossy vegetation, creeping vines, and root overgrowth around ruins";
     if (themeText.includes("swamp")) return "thick reeds, low marsh plants, and patchy overgrown banks";
     if (themeText.includes("desert") || themeText.includes("volcanic")) return "sparse hardy vegetation with clear exposed terrain";
@@ -3637,6 +3686,9 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
   })();
 
   const waterFeatures = (() => {
+    if (themeText.includes("coastal") || themeText.includes("beach") || themeText.includes("ocean") || themeText.includes("shore")) {
+      return "ocean shoreline with readable surf edge and clear dry-to-wet sand transition";
+    }
     if (hasTerrain("waterfall")) return "shallow stream crossing beneath a weathered waterfall lip";
     if (hasTerrain("river")) return "narrow stream channels with natural crossing points and wet shoreline detail";
     if (hasTerrain("pond") || hasTerrain("lake")) return "still water pockets with shoreline vegetation and reflective highlights";
@@ -3645,6 +3697,9 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
   })();
 
   const architectureStyle = (() => {
+    if (themeText.includes("coastal") || themeText.includes("beach") || themeText.includes("shore") || themeText.includes("wilderness")) {
+      return "minimal built structures, natural terrain storytelling, and practical outdoor encounter composition";
+    }
     if (themeText.includes("ruins") || themeText.includes("temple")) {
       return "broken temple walls, collapsed pillars, fractured arches, and carved stone relic fragments";
     }
@@ -3696,6 +3751,7 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
     "NO ISOMETRIC.",
     "NO PERSPECTIVE CAMERA.",
     "NO CINEMATIC ANGLES.",
+    `Primary user request (must follow closely): ${plan.sourcePrompt || `${plan.biome} ${plan.theme}`}.`,
     `Biome and setting: ${plan.biome}, ${plan.theme}, ${plan.mapSize} scale (${plan.estimatedGrid}), ${plan.lightingMood} mood.`,
     `Terrain direction: ${terrainType}.`,
     `Vegetation density: ${vegetationDensity}.`,
@@ -3739,7 +3795,21 @@ function mapAiPlanThemeToSceneTheme(plan) {
   const themeText = `${plan.theme} ${plan.biome}`.toLowerCase();
   if (themeText.includes("tavern") || themeText.includes("village") || themeText.includes("camp")) return "tavern";
   if (themeText.includes("cave") || themeText.includes("underground") || themeText.includes("sewer")) return "cave";
-  if (themeText.includes("forest") || themeText.includes("jungle") || themeText.includes("ruins") || themeText.includes("temple")) return "forest-ruins";
+  if (
+    themeText.includes("forest")
+    || themeText.includes("jungle")
+    || themeText.includes("ruins")
+    || themeText.includes("temple")
+    || themeText.includes("coastal")
+    || themeText.includes("beach")
+    || themeText.includes("ocean")
+    || themeText.includes("shore")
+    || themeText.includes("desert")
+    || themeText.includes("snow")
+    || themeText.includes("swamp")
+    || themeText.includes("mountain")
+    || themeText.includes("wilderness")
+  ) return "forest-ruins";
   return "dungeon";
 }
 
