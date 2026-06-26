@@ -350,7 +350,7 @@ function getSceneFromDirectoryLi(li) {
 /**
  * Open the generator dialog from our template.
  */
-async function openGeneratorDialog() {
+async function openGeneratorDialog(initialState = null) {
   const content = await renderTemplate(`modules/${MODULE_ID}/templates/generator-dialog.html`);
 
   const dialog = new Dialog({
@@ -371,7 +371,7 @@ async function openGeneratorDialog() {
     },
     default: "generate",
     render: (dialogHtml) => {
-      wireAutoDetectUi(dialogHtml);
+      wireAutoDetectUi(dialogHtml, initialState);
     }
   });
 
@@ -382,10 +382,13 @@ async function openGeneratorDialog() {
  * Wire click behavior for "Auto Detect From Prompt".
  * The detected payload is cached in the form's jQuery data so Generate can reuse it.
  */
-function wireAutoDetectUi(dialogHtml) {
+function wireAutoDetectUi(dialogHtml, initialState = null) {
   const form = dialogHtml.find(".sceneforge-form");
   const autoDetectButton = dialogHtml.find(".sceneforge-autodetect-btn");
   const useDetectedToggle = form.find('[name="useDetectedSettings"]');
+
+  // If we returned from preview mode via Back/Edit, restore previous values.
+  applyGeneratorFormState(form, initialState);
 
   // Run once on initial render so the preview is immediately useful.
   refreshDetectionPreview(dialogHtml);
@@ -405,6 +408,19 @@ function wireAutoDetectUi(dialogHtml) {
       applyDetectedSettingsToControls(form, detected);
     }
   });
+}
+
+/**
+ * Apply previously entered generator form values into the dialog inputs.
+ */
+function applyGeneratorFormState(form, state) {
+  if (!state || typeof state !== "object") return;
+  if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
+  if (typeof state.sceneSizeKey === "string") form.find('[name="sceneSize"]').val(state.sceneSizeKey);
+  if (typeof state.theme === "string") form.find('[name="theme"]').val(state.theme);
+  if (typeof state.lightingMood === "string") form.find('[name="lightingMood"]').val(state.lightingMood);
+  if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
+  if (typeof state.useDetectedSettings === "boolean") form.find('[name="useDetectedSettings"]').prop("checked", state.useDetectedSettings);
 }
 
 /**
@@ -441,36 +457,36 @@ function applyDetectedSettingsToControls(form, detected) {
  */
 async function handleGenerate(dialogHtml) {
   const form = dialogHtml.find(".sceneforge-form");
+  const generationConfig = buildGenerationConfigFromForm(form);
+  if (!generationConfig) return;
+
+  const previewData = buildGenerationPreviewData(generationConfig);
+  await openGenerationPreviewDialog(generationConfig, previewData);
+}
+
+/**
+ * Build normalized generation config from generator dialog inputs.
+ */
+function buildGenerationConfigFromForm(form) {
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
   let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
   let lightingMood = String(form.find('[name="lightingMood"]').val() ?? "dim");
   const useDetectedSettings = form.find('[name="useDetectedSettings"]').is(":checked");
-
-  // If user leaves seed blank, we create one now and persist it in scene flags.
   const seedInput = String(form.find('[name="seed"]').val() ?? "").trim();
   const seed = seedInput || randomSeedString();
 
   if (!prompt) {
     ui.notifications.warn("SceneForge AI: Please enter a prompt before generating.");
-    return;
+    return null;
   }
 
-  // Parse from current prompt during Generate so data always matches latest text.
   const detected = parsePromptForSceneSettings(prompt);
-
   if (useDetectedSettings) {
-    // Requirement: when ON, detected settings override manual choices.
     theme = detected.theme;
     sceneSizeKey = detected.suggestedSize;
     lightingMood = detected.lightingMood;
   }
-
-  const effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
-
-  const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
 
   const generationData = {
     prompt,
@@ -479,13 +495,155 @@ async function handleGenerate(dialogHtml) {
     lightingMood,
     detected,
     useDetectedSettings,
-    effectiveDetected,
+    effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.8.0"
+    moduleVersion: "0.9.0"
   };
 
-  const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
+  // Store the raw form values so Back/Edit can restore exactly what user entered.
+  const formState = {
+    prompt,
+    sceneSizeKey: String(form.find('[name="sceneSize"]').val() ?? "medium"),
+    theme: String(form.find('[name="theme"]').val() ?? "dungeon"),
+    lightingMood: String(form.find('[name="lightingMood"]').val() ?? "dim"),
+    seed,
+    useDetectedSettings
+  };
+
+  return {
+    generationData,
+    formState,
+    seedWasAutoGenerated: !seedInput
+  };
+}
+
+/**
+ * Requirement helper:
+ * Estimate object counts and summarize final generation state before creation.
+ */
+function buildGenerationPreviewData(config) {
+  const generationData = config.generationData;
+  const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
+  const widthPx = gridCells * GRID_SIZE_PX;
+  const heightPx = gridCells * GRID_SIZE_PX;
+
+  const rng = createSeededRng(`${generationData.seed}|${generationData.theme}|${generationData.sceneSizeKey}|${generationData.prompt}`);
+  const walls = buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected);
+  const tiles = buildThemeTiles(
+    generationData.theme,
+    widthPx,
+    heightPx,
+    walls,
+    rng,
+    generationData.seed,
+    generationData.effectiveDetected,
+    generationData.enabledAssetPacks
+  );
+  const lights = buildThemeLights(
+    generationData.theme,
+    widthPx,
+    heightPx,
+    rng,
+    generationData.seed,
+    generationData.lightingMood,
+    generationData.effectiveDetected
+  );
+
+  const appliedFeatures = FEATURE_KEYS
+    .filter((key) => generationData.effectiveDetected?.features?.[key])
+    .map((key) => formatFeatureLabel(key, generationData.effectiveDetected.features));
+
+  const estimatedNotes = 1 + (generationData.effectiveDetected?.features?.treasure ? 1 : 0);
+
+  return {
+    finalTheme: generationData.theme,
+    finalSize: generationData.sceneSizeKey,
+    finalSeed: generationData.seed,
+    lightingMood: generationData.lightingMood,
+    appliedFeatures,
+    enabledAssetPacks: generationData.enabledAssetPacks,
+    estimated: {
+      walls: walls.length,
+      lights: lights.length,
+      tiles: tiles.floorTiles.length + tiles.propTiles.length,
+      notes: estimatedNotes
+    }
+  };
+}
+
+/**
+ * Shows SceneForge Preview Mode and routes user choice.
+ */
+async function openGenerationPreviewDialog(config, previewData) {
+  const featuresHtml = previewData.appliedFeatures.length > 0
+    ? previewData.appliedFeatures.map((feature) => `<li>${foundry.utils.escapeHTML(feature)}</li>`).join("")
+    : "<li>None</li>";
+
+  const packsHtml = previewData.enabledAssetPacks.length > 0
+    ? previewData.enabledAssetPacks.map((packId) => `<li>${foundry.utils.escapeHTML(packId)}</li>`).join("")
+    : "<li>base</li>";
+
+  const content = `
+<div class="sceneforge-preview">
+  <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
+  <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
+  <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
+  <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[previewData.lightingMood] ?? "Dim")}</p>
+  <p><strong>Detected Features Being Applied:</strong></p>
+  <ul>${featuresHtml}</ul>
+  <p><strong>Enabled Asset Packs:</strong></p>
+  <ul>${packsHtml}</ul>
+  <hr/>
+  <p><strong>Estimated Objects</strong></p>
+  <p>Walls: ${previewData.estimated.walls} | Lights: ${previewData.estimated.lights} | Tiles: ${previewData.estimated.tiles} | Notes: ${previewData.estimated.notes}</p>
+</div>
+  `;
+
+  const userChoice = await new Promise((resolve) => {
+    const dialog = new Dialog({
+      title: "SceneForge Preview Mode",
+      content,
+      buttons: {
+        confirm: {
+          icon: '<i class="fas fa-check"></i>',
+          label: "Confirm Generate",
+          callback: () => resolve("confirm")
+        },
+        back: {
+          icon: '<i class="fas fa-arrow-left"></i>',
+          label: "Back / Edit",
+          callback: () => resolve("back")
+        },
+        cancel: {
+          icon: '<i class="fas fa-times"></i>',
+          label: "Cancel",
+          callback: () => resolve("cancel")
+        }
+      },
+      default: "confirm",
+      close: () => resolve("cancel")
+    });
+    dialog.render(true);
+  });
+
+  if (userChoice === "back") {
+    await openGeneratorDialog(config.formState);
+    return;
+  }
+  if (userChoice !== "confirm") return;
+
+  await createSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
+}
+
+/**
+ * Shared scene creation path used after preview confirmation.
+ */
+async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+  const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
+  const widthPx = gridCells * GRID_SIZE_PX;
+  const heightPx = gridCells * GRID_SIZE_PX;
+  const sceneName = `SceneForge - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   try {
     const scene = await Scene.create({
@@ -508,14 +666,12 @@ async function handleGenerate(dialogHtml) {
       }
     });
 
-    if (!scene) {
-      throw new Error("Scene creation returned no scene document.");
-    }
+    if (!scene) throw new Error("Scene creation returned no scene document.");
 
     await generateSceneLayout(scene, generationData);
 
-    if (!seedInput) {
-      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${seed}".`);
+    if (seedWasAutoGenerated) {
+      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${generationData.seed}".`);
     }
     ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
   } catch (error) {
@@ -793,7 +949,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.8.0",
+    version: generationData.moduleVersion ?? "0.9.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -900,7 +1056,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.8.0"
+    moduleVersion: "0.9.0"
   };
 
   return {
@@ -1195,7 +1351,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.8.0",
+    moduleVersion: "0.9.0",
     lastGeneratedAt: Date.now()
   });
 }
