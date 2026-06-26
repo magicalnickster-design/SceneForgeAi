@@ -1,0 +1,34 @@
+<form class="sceneforge-form">
+  <div class="form-group">
+    <label for="sf-prompt">Prompt</label>
+    <textarea
+      id="sf-prompt"
+      name="prompt"
+      rows="4"
+      placeholder="Example: Create a ruined forest temple with a boss room, two side chambers, broken pillars, and torch lighting."
+      required
+    ></textarea>
+    <p class="notes">
+      Describe the layout mood and major room ideas in plain language.
+    </p>
+  </div>
+
+  <div class="form-group">
+    <label for="sf-scene-size">Scene Size</label>
+    <select id="sf-scene-size" name="sceneSize">
+      <option value="small">Small (30x30)</option>
+      <option value="medium" selected>Medium (50x50)</option>
+      <option value="large">Large (70x70)</option>
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label for="sf-theme">Theme</label>
+    <select id="sf-theme" name="theme">
+      <option value="tavern">Tavern</option>
+      <option value="cave">Cave</option>
+      <option value="forest-ruins" selected>Forest Ruins</option>
+      <option value="dungeon">Dungeon</option>
+    </select>
+  </div>
+</form>

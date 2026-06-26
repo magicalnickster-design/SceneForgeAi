@@ -1,0 +1,14 @@
+/* Scene Directory button styling so it stands out from default controls. */
+.sceneforge-generate-btn {
+  margin-top: 4px;
+}
+
+/* Dialog spacing and readability helpers. */
+.sceneforge-form .form-group {
+  margin-bottom: 0.75rem;
+}
+
+.sceneforge-form textarea {
+  min-height: 90px;
+  resize: vertical;
+}

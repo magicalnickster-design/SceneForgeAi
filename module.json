@@ -1,0 +1,29 @@
+{
+  "id": "sceneforge-ai",
+  "title": "SceneForge AI",
+  "description": "MVP module that generates a basic playable scene from a GM prompt.",
+  "version": "0.1.0",
+  "authors": [
+    {
+      "name": "SceneForge AI Team"
+    }
+  ],
+  "compatibility": {
+    "minimum": "12",
+    "verified": "12"
+  },
+  "scripts": [
+    "scripts/sceneforge.js"
+  ],
+  "styles": [
+    "styles/sceneforge.css"
+  ],
+  "languages": [],
+  "packs": [],
+  "socket": false,
+  "url": "",
+  "manifest": "",
+  "download": "",
+  "license": "MIT",
+  "readme": "README.md"
+}
