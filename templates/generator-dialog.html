@@ -1,5 +1,16 @@
 <form class="sceneforge-form">
   <div class="form-group">
+    <label for="sf-generation-mode">Generation Mode</label>
+    <select id="sf-generation-mode" name="generationMode">
+      <option value="procedural" selected>Procedural Mode</option>
+      <option value="ai-planner">AI Planner Mode</option>
+    </select>
+    <p class="notes">
+      Procedural uses current deterministic templates. AI Planner builds a structured local plan first.
+    </p>
+  </div>
+
+  <div class="form-group">
     <label for="sf-prompt">Prompt</label>
     <textarea
       id="sf-prompt"

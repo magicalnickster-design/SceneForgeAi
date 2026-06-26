@@ -14,7 +14,9 @@ const MODULE_ID = "sceneforge-ai";
 const GRID_SIZE_PX = 100;
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
+const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const DEBUG = false;
+const TILE_FALLBACK_MODE = "skip-missing";
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -29,6 +31,7 @@ function debugLog(...args) {
 const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
 const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
+const ASSET_PATH_AVAILABILITY_CACHE = new Map();
 
 /**
  * Scene sizes are expressed in grid cells.
@@ -73,6 +76,56 @@ const FEATURE_KEYS = [
   "cells"
 ];
 
+const AI_PLANNER_BIOMES = [
+  "jungle",
+  "forest",
+  "desert",
+  "snow",
+  "swamp",
+  "cave",
+  "underground",
+  "coastal",
+  "mountain",
+  "volcanic"
+];
+
+const AI_PLANNER_THEMES = [
+  "ruins",
+  "temple",
+  "dungeon",
+  "tavern",
+  "castle",
+  "crypt",
+  "village",
+  "camp",
+  "fortress",
+  "sewer"
+];
+
+const AI_PLANNER_TERRAIN_FEATURES = [
+  "river",
+  "bridge",
+  "waterfall",
+  "lava",
+  "cliffs",
+  "road",
+  "pond",
+  "lake",
+  "trees",
+  "pillars",
+  "altar",
+  "treasure",
+  "hidden room",
+  "side rooms",
+  "boss room",
+  "puzzle room",
+  "prison cells",
+  "market stalls",
+  "docks"
+];
+
+const AI_PLANNER_LIGHTING_MOODS = ["bright", "dim", "dark", "magical", "torchlit"];
+
 /**
  * Settings keys for optional premium-style asset packs.
  * Base assets are always included and do not need a setting.
@@ -80,6 +133,11 @@ const FEATURE_KEYS = [
 const SETTING_PREMIUM_TAVERN_PACK = "enablePremiumTavernPack";
 const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
 const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
+const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
+const SETTING_OPENAI_API_KEY = "openAiApiKey";
+const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
+const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
+const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 
 /**
  * Base registry ships with the core module.
@@ -193,6 +251,64 @@ function registerAssetPackSettings() {
     type: Boolean,
     default: false
   });
+
+  game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
+    name: "AI Image Provider",
+    hint: "Select provider architecture target. Mock does not call external APIs.",
+    scope: "world",
+    config: true,
+    type: String,
+    choices: {
+      none: "None",
+      mock: "Mock Provider",
+      openai: "OpenAI placeholder",
+      stability: "Stability placeholder"
+    },
+    default: "none"
+  });
+
+  game.settings.register(MODULE_ID, SETTING_OPENAI_API_KEY, {
+    name: "OpenAI API Key",
+    hint: "Used only when AI Image Provider is OpenAI placeholder.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT, {
+    name: "OpenAI Monthly Generation Limit",
+    hint: "Hard cap on successful paid generations per month.",
+    scope: "world",
+    config: true,
+    type: Number,
+    default: 20,
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_CONFIRM_PAID_GENERATION, {
+    name: "Confirm Before Paid Generation",
+    hint: "When enabled, a paid confirmation dialog is required before OpenAI generation.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true,
+    restricted: true
+  });
+
+  // Hidden bookkeeping setting for monthly usage tracking.
+  game.settings.register(MODULE_ID, SETTING_OPENAI_USAGE_TRACKING, {
+    name: "OpenAI Usage Tracking",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {
+      monthKey: "",
+      count: 0
+    },
+    restricted: true
+  });
 }
 
 /**
@@ -243,6 +359,52 @@ function getEnabledAssetPackIds() {
   if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) packIds.push("dark-dungeon");
   if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) packIds.push("rune-ruins");
   return packIds;
+}
+
+function getAiImageProvider() {
+  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "none");
+}
+
+function getOpenAiApiKey() {
+  return String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim();
+}
+
+function getOpenAiMonthlyLimit() {
+  return Math.max(0, Number(game.settings.get(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT) ?? 0));
+}
+
+function isPaidGenerationConfirmationEnabled() {
+  return game.settings.get(MODULE_ID, SETTING_CONFIRM_PAID_GENERATION) === true;
+}
+
+function getCurrentUsageMonthKey() {
+  const now = new Date();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${now.getUTCFullYear()}-${month}`;
+}
+
+async function getOpenAiUsageState() {
+  const raw = game.settings.get(MODULE_ID, SETTING_OPENAI_USAGE_TRACKING) ?? {};
+  const currentMonth = getCurrentUsageMonthKey();
+  if (raw.monthKey !== currentMonth) {
+    const resetState = { monthKey: currentMonth, count: 0 };
+    await game.settings.set(MODULE_ID, SETTING_OPENAI_USAGE_TRACKING, resetState);
+    return resetState;
+  }
+  return {
+    monthKey: currentMonth,
+    count: Number(raw.count) || 0
+  };
+}
+
+async function incrementOpenAiUsageCount() {
+  const usage = await getOpenAiUsageState();
+  const next = {
+    monthKey: usage.monthKey,
+    count: usage.count + 1
+  };
+  await game.settings.set(MODULE_ID, SETTING_OPENAI_USAGE_TRACKING, next);
+  return next;
 }
 
 /**
@@ -450,6 +612,7 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
  */
 function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
+  if (typeof state.generationMode === "string") form.find('[name="generationMode"]').val(state.generationMode);
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.sceneSizeKey === "string") form.find('[name="sceneSize"]').val(state.sceneSizeKey);
   if (typeof state.theme === "string") form.find('[name="theme"]').val(state.theme);
@@ -503,6 +666,7 @@ async function handleGenerate(dialogHtml) {
  * Build normalized generation config from generator dialog inputs.
  */
 function buildGenerationConfigFromForm(form) {
+  const generationMode = String(form.find('[name="generationMode"]').val() ?? "procedural");
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
   let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
@@ -517,27 +681,59 @@ function buildGenerationConfigFromForm(form) {
   }
 
   const detected = parsePromptForSceneSettings(prompt);
-  if (useDetectedSettings) {
+  if (generationMode === "procedural" && useDetectedSettings) {
     theme = detected.theme;
     sceneSizeKey = detected.suggestedSize;
     lightingMood = detected.lightingMood;
   }
 
+  let aiPlan = null;
+  let layoutGraph = null;
+  let compiledImagePrompt = null;
+  let effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
+
+  if (generationMode === "ai-planner") {
+    aiPlan = parseAiMapPlan(prompt);
+    layoutGraph = buildLayoutGraphFromPlan(aiPlan, seed);
+    compiledImagePrompt = compileInkarnatePrompt(aiPlan, layoutGraph);
+
+    // AI planner provides the final map intent; map it onto current generator knobs.
+    theme = mapAiPlanThemeToSceneTheme(aiPlan);
+    sceneSizeKey = mapAiPlanSizeToSceneSizeKey(aiPlan.mapSize);
+    lightingMood = mapAiPlanLightingToSceneLighting(aiPlan.lightingMood);
+    effectiveDetected = applyAiPlanFeaturesToDetected(effectiveDetected, aiPlan);
+  }
+
   const generationData = {
+    generationMode,
     prompt,
     sceneSizeKey,
     theme,
     lightingMood,
     detected,
     useDetectedSettings,
-    effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
+    effectiveDetected,
+    aiPlan,
+    layoutGraph,
+    compiledImagePrompt,
+    imageGeneration: {
+      provider: getAiImageProvider(),
+      compiledPrompt: compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.10.2"
+    moduleVersion: "0.14.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
   const formState = {
+    generationMode,
     prompt,
     sceneSizeKey: String(form.find('[name="sceneSize"]').val() ?? "medium"),
     theme: String(form.find('[name="theme"]').val() ?? "dungeon"),
@@ -602,12 +798,22 @@ function buildGenerationPreviewData(config) {
   });
 
   return {
+    generationMode: generationData.generationMode ?? "procedural",
     finalTheme: generationData.theme,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
     lightingMood: generationData.lightingMood,
     appliedFeatures,
     enabledAssetPacks: generationData.enabledAssetPacks,
+    aiPlan: generationData.aiPlan,
+    layoutGraph: generationData.layoutGraph,
+    compiledImagePrompt: generationData.compiledImagePrompt,
+    aiImageProvider: generationData.imageGeneration?.provider ?? "none",
+    aiImageCostEstimate: generationData.imageGeneration?.costEstimate ?? {
+      preview: "$0.00 mock",
+      final: "$0.08 placeholder"
+    },
+    aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
     estimated: {
       walls: walls.length,
       ambientLights: lights.length,
@@ -677,9 +883,37 @@ async function openGenerationPreviewDialog(config, previewData) {
   const featureImpactHtml = previewData.featureImpact.length > 0
     ? previewData.featureImpact.map((line) => `<li>${foundry.utils.escapeHTML(line)}</li>`).join("")
     : "<li>No special feature impacts detected.</li>";
+  const aiSummaryHtml = previewData.aiReadableSummary
+    ? previewData.aiReadableSummary.map((line) => `<li>${foundry.utils.escapeHTML(line)}</li>`).join("")
+    : "";
+  const aiPlanJsonHtml = previewData.aiPlan
+    ? foundry.utils.escapeHTML(JSON.stringify(previewData.aiPlan, null, 2))
+    : "";
+  const layoutGraphJsonHtml = previewData.layoutGraph
+    ? foundry.utils.escapeHTML(JSON.stringify(previewData.layoutGraph, null, 2))
+    : "";
+  const compiledPromptHtml = previewData.compiledImagePrompt
+    ? foundry.utils.escapeHTML(previewData.compiledImagePrompt)
+    : "";
+  const aiPlannerSection = previewData.generationMode === "ai-planner"
+    ? `
+  <hr/>
+  <p><strong>AI Planner Summary</strong></p>
+  <ul>${aiSummaryHtml}</ul>
+  <p><strong>Structured JSON Plan</strong></p>
+  <pre>${aiPlanJsonHtml}</pre>
+  <p><strong>Layout Graph JSON</strong></p>
+  <pre>${layoutGraphJsonHtml}</pre>
+  <p><strong>Compiled Image Prompt Preview</strong></p>
+  <pre>${compiledPromptHtml}</pre>
+  <p><strong>AI Image Provider:</strong> ${foundry.utils.escapeHTML(previewData.aiImageProvider)}</p>
+  <p><strong>Cost Estimate:</strong> preview image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.preview)}, final image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.final)}</p>
+    `
+    : "";
 
   const content = `
 <div class="sceneforge-preview">
+  <p><strong>Generation Mode:</strong> ${previewData.generationMode === "ai-planner" ? "AI Planner Mode" : "Procedural Mode"}</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
@@ -688,6 +922,7 @@ async function openGenerationPreviewDialog(config, previewData) {
   <ul>${featuresHtml}</ul>
   <p><strong>Enabled Asset Packs:</strong></p>
   <ul>${packsHtml}</ul>
+  ${aiPlannerSection}
   <hr/>
   <p><strong>Estimated Objects</strong></p>
   <p>Walls: ${previewData.estimated.walls} | Ambient Lights: ${previewData.estimated.ambientLights} | Tiles: ${previewData.estimated.floorTiles + previewData.estimated.propTiles} | Notes: ${previewData.estimated.notes}</p>
@@ -715,26 +950,38 @@ async function openGenerationPreviewDialog(config, previewData) {
   `;
 
   const userChoice = await new Promise((resolve) => {
+    const buttons = {
+      confirm: {
+        icon: '<i class="fas fa-check"></i>',
+        label: "Confirm Generate",
+        callback: () => resolve("confirm")
+      },
+      back: {
+        icon: '<i class="fas fa-arrow-left"></i>',
+        label: "Back / Edit",
+        callback: () => resolve("back")
+      },
+      cancel: {
+        icon: '<i class="fas fa-times"></i>',
+        label: "Cancel",
+        callback: () => resolve("cancel")
+      }
+    };
+
+    if (previewData.generationMode === "ai-planner") {
+      const provider = previewData.aiImageProvider;
+      const mockLabel = provider === "openai" ? "Generate AI Map (Paid)" : "Generate Mock AI Map";
+      buttons.mock = {
+        icon: '<i class="fas fa-image"></i>',
+        label: mockLabel,
+        callback: () => resolve("mock")
+      };
+    }
+
     const dialog = new Dialog({
       title: "SceneForge Preview Mode",
       content,
-      buttons: {
-        confirm: {
-          icon: '<i class="fas fa-check"></i>',
-          label: "Confirm Generate",
-          callback: () => resolve("confirm")
-        },
-        back: {
-          icon: '<i class="fas fa-arrow-left"></i>',
-          label: "Back / Edit",
-          callback: () => resolve("back")
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => resolve("cancel")
-        }
-      },
+      buttons,
       default: "confirm",
       close: () => resolve("cancel")
     });
@@ -745,6 +992,10 @@ async function openGenerationPreviewDialog(config, previewData) {
     await openGeneratorDialog(config.formState);
     return;
   }
+  if (userChoice === "mock") {
+    await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
+    return;
+  }
   if (userChoice !== "confirm") return;
 
   await createSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
@@ -753,13 +1004,18 @@ async function openGenerationPreviewDialog(config, previewData) {
 /**
  * Shared scene creation path used after preview confirmation.
  */
-async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false, options = {}) {
+  const { backgroundPath = null, imageGenerationMetadata = null } = options;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
   const heightPx = gridCells * GRID_SIZE_PX;
   const sceneName = `SceneForge - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   try {
+    const resolvedGenerationData = imageGenerationMetadata
+      ? { ...generationData, imageGeneration: imageGenerationMetadata }
+      : generationData;
+
     const scene = await Scene.create({
       name: sceneName,
       width: widthPx,
@@ -775,23 +1031,277 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       navigation: true,
       flags: {
         [MODULE_ID]: {
-          [FLAG_GENERATION_KEY]: generationData
+          [FLAG_GENERATION_KEY]: resolvedGenerationData
         }
       }
     });
 
     if (!scene) throw new Error("Scene creation returned no scene document.");
 
-    await generateSceneLayout(scene, generationData);
+    if (backgroundPath) {
+      await scene.update({
+        background: {
+          src: backgroundPath
+        }
+      });
+    }
+
+    if (imageGenerationMetadata) {
+      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, imageGenerationMetadata);
+    }
+
+    await generateSceneLayout(scene, resolvedGenerationData);
 
     if (seedWasAutoGenerated) {
-      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${generationData.seed}".`);
+      ui.notifications.info(`SceneForge AI: Seed auto-generated as "${resolvedGenerationData.seed}".`);
     }
     ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
   } catch (error) {
     console.error(`${MODULE_ID} | Scene generation failed`, error);
     ui.notifications.error("SceneForge AI: Failed to generate scene. Check browser console for details.");
   }
+}
+
+/**
+ * Preview button path for AI Planner Mode.
+ * Uses configured provider architecture and handles failures safely.
+ */
+async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+  const compiledPrompt = generationData.compiledImagePrompt ?? "";
+  const imageResult = await generateAiMapImage(compiledPrompt, {
+    mode: "preview",
+    seed: generationData.seed
+  });
+
+  if (imageResult?.imageStatus === "failed") {
+    const errorMessage = imageResult.errorMessage ?? "Image generation failed.";
+    ui.notifications.error(`SceneForge AI: ${errorMessage}`);
+  } else if (!imageResult?.imagePath) {
+    ui.notifications.warn("SceneForge AI: Image generation did not produce a background path.");
+  }
+
+  const imageGenerationMetadata = {
+    provider: imageResult.provider,
+    compiledPrompt,
+    imageStatus: imageResult.imageStatus,
+    imagePath: imageResult.imagePath,
+    costEstimate: imageResult.costEstimate
+  };
+
+  await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+    backgroundPath: imageResult.imageStatus === "complete" || imageResult.imageStatus === "mock-generated"
+      ? (imageResult.imagePath ?? null)
+      : null,
+    imageGenerationMetadata
+  });
+}
+
+/**
+ * Provider architecture router.
+ * Real generation is currently enabled only for the OpenAI provider path.
+ */
+async function generateAiMapImage(compiledPrompt, options = {}) {
+  const configuredProvider = getAiImageProvider();
+  const provider = configuredProvider === "none" ? "mock" : configuredProvider;
+
+  if (provider === "mock") {
+    debugLog("Mock provider compiled prompt", compiledPrompt);
+    const imagePath = buildMockMapBackgroundDataUri(options);
+    return {
+      provider: "mock",
+      imageStatus: "mock-generated",
+      imagePath,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    };
+  }
+
+  if (provider === "openai") {
+    return generateOpenAiMapImage(compiledPrompt, options);
+  }
+
+  // Placeholder architecture for not-yet-implemented providers.
+  return {
+    provider: configuredProvider,
+    imageStatus: "not-generated",
+    imagePath: null,
+    costEstimate: {
+      preview: "$0.00 mock",
+      final: "$0.08 placeholder"
+    }
+  };
+}
+
+/**
+ * Real OpenAI image generation path with hard safety controls.
+ */
+async function generateOpenAiMapImage(compiledPrompt, options = {}) {
+  const provider = "openai";
+  const costEstimate = {
+    preview: "$0.00 mock",
+    final: "$0.08 placeholder"
+  };
+
+  const apiKey = getOpenAiApiKey();
+  if (!apiKey) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "OpenAI API key is missing. Add it in SceneForge module settings."
+    };
+  }
+
+  const monthlyLimit = getOpenAiMonthlyLimit();
+  const usage = await getOpenAiUsageState();
+  if (usage.count >= monthlyLimit) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `Monthly generation limit reached (${usage.count}/${monthlyLimit}).`
+    };
+  }
+
+  const confirmed = await promptPaidGenerationConfirmation(compiledPrompt, {
+    estimatedCost: costEstimate.final,
+    usageCount: usage.count,
+    usageLimit: monthlyLimit,
+    requireConfirmation: isPaidGenerationConfirmationEnabled()
+  });
+  if (!confirmed) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "Paid generation cancelled."
+    };
+  }
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-image-1",
+        prompt: compiledPrompt,
+        size: "1024x1024"
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI image request failed (${response.status}).`);
+    }
+
+    const payload = await response.json();
+    const first = payload?.data?.[0] ?? null;
+    const imagePath = first?.b64_json
+      ? `data:image/png;base64,${first.b64_json}`
+      : (first?.url ?? null);
+
+    if (!imagePath) {
+      throw new Error("OpenAI response did not include an image payload.");
+    }
+
+    await incrementOpenAiUsageCount();
+
+    return {
+      provider,
+      imageStatus: "complete",
+      imagePath,
+      costEstimate
+    };
+  } catch (error) {
+    debugLog("OpenAI generation failed", error?.message ?? error);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `OpenAI generation failed: ${error?.message ?? "unknown error"}`
+    };
+  }
+}
+
+/**
+ * Paid generation confirmation dialog shown before OpenAI API request.
+ */
+function promptPaidGenerationConfirmation(compiledPrompt, options = {}) {
+  const {
+    estimatedCost = "$0.08 placeholder",
+    usageCount = 0,
+    usageLimit = 0,
+    requireConfirmation = true
+  } = options;
+
+  if (!requireConfirmation) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    const dialog = new Dialog({
+      title: "Confirm Paid AI Generation",
+      content: `
+<p><strong>Estimated Cost:</strong> ${foundry.utils.escapeHTML(estimatedCost)}</p>
+<p><strong>Monthly Usage:</strong> ${usageCount}/${usageLimit}</p>
+<p><strong>Compiled Prompt:</strong></p>
+<pre>${foundry.utils.escapeHTML(compiledPrompt)}</pre>
+      `,
+      buttons: {
+        confirm: {
+          icon: '<i class="fas fa-check"></i>',
+          label: "Confirm Paid Generation",
+          callback: () => resolve(true)
+        },
+        cancel: {
+          icon: '<i class="fas fa-times"></i>',
+          label: "Cancel",
+          callback: () => resolve(false)
+        }
+      },
+      default: "cancel",
+      close: () => resolve(false)
+    });
+    dialog.render(true);
+  });
+}
+
+/**
+ * Build a simple SVG data URI as local placeholder background.
+ */
+function buildMockMapBackgroundDataUri(options = {}) {
+  const size = 1024;
+  const seed = String(options.seed ?? "mock");
+  const colorA = "#2f3e46";
+  const colorB = "#1f2a30";
+  const colorC = "#4f6d7a";
+  const label = `SceneForge Mock ${seed}`.replace(/&/g, "&amp;");
+
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${colorA}" />
+      <stop offset="100%" stop-color="${colorB}" />
+    </linearGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0 L0 0 0 64" fill="none" stroke="${colorC}" stroke-opacity="0.2" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="${size}" height="${size}" fill="url(#bg)" />
+  <rect width="${size}" height="${size}" fill="url(#grid)" />
+  <circle cx="${size / 2}" cy="${size / 2}" r="${size / 5}" fill="${colorC}" fill-opacity="0.2" />
+  <text x="${size / 2}" y="${size - 40}" text-anchor="middle" font-size="26" fill="#d9e4ea" fill-opacity="0.85">${label}</text>
+</svg>
+  `.trim();
+
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 /**
@@ -1067,15 +1577,20 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.10.2",
+    version: generationData.moduleVersion ?? "0.14.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
+    generationMode: generationData.generationMode ?? "procedural",
     prompt: generationData.prompt,
     theme: generationData.theme,
     size: generationData.sceneSizeKey,
     sceneSizeKey: generationData.sceneSizeKey,
     seed: generationData.seed,
     lightingMood: generationData.lightingMood ?? "dim",
+    aiPlan: generationData.aiPlan ?? null,
+    layoutGraph: generationData.layoutGraph ?? null,
+    compiledImagePrompt: generationData.compiledImagePrompt ?? null,
+    imageGeneration: generationData.imageGeneration ?? null,
     detected: generationData.detected ?? null,
     detectedFeatures: generationData.detected?.features ?? null,
     useDetectedSettings: generationData.useDetectedSettings !== false,
@@ -1136,6 +1651,7 @@ function validateImportedPreset(rawPreset) {
   }
 
   const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
+  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "procedural");
   const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
   const theme = String(rawPreset.theme ?? rawPreset.generationData?.theme ?? "").trim();
   const sceneSizeKey = String(rawPreset.size ?? rawPreset.sceneSizeKey ?? rawPreset.generationData?.sceneSizeKey ?? "").trim();
@@ -1157,24 +1673,54 @@ function validateImportedPreset(rawPreset) {
   const detected = rawPreset.detected
     ?? rawPreset.generationData?.detected
     ?? parsePromptForSceneSettings(prompt);
+  const aiPlan = rawPreset.aiPlan
+    ?? rawPreset.generationData?.aiPlan
+    ?? (generationMode === "ai-planner" ? parseAiMapPlan(prompt) : null);
+  const layoutGraph = rawPreset.layoutGraph
+    ?? rawPreset.generationData?.layoutGraph
+    ?? (aiPlan ? buildLayoutGraphFromPlan(aiPlan, seed) : null);
+  const compiledImagePrompt = rawPreset.compiledImagePrompt
+    ?? rawPreset.generationData?.compiledImagePrompt
+    ?? (aiPlan ? compileInkarnatePrompt(aiPlan, layoutGraph) : null);
+  const imageGeneration = rawPreset.imageGeneration
+    ?? rawPreset.generationData?.imageGeneration
+    ?? {
+      provider: getAiImageProvider(),
+      compiledPrompt: compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    };
 
   const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
   const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
+  const baseDetected = (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected);
+  const effectiveDetected = generationMode === "ai-planner"
+    ? applyAiPlanFeaturesToDetected(baseDetected, aiPlan ?? parseAiMapPlan(prompt))
+    : baseDetected;
 
   const generationData = {
+    generationMode,
     prompt,
     sceneSizeKey,
     theme,
     lightingMood,
     detected,
     useDetectedSettings: useDetectedSettings !== false,
-    effectiveDetected: (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected),
+    effectiveDetected,
+    aiPlan,
+    layoutGraph,
+    compiledImagePrompt,
+    imageGeneration,
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: Array.isArray(rawPreset.generationLayers)
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.2"
+    moduleVersion: "0.14.0"
   };
 
   return {
@@ -1360,6 +1906,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
   const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
+  const validatedTileLayers = await applyTileFallbackModeToTileLayers(tileLayers);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -1372,12 +1919,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await scene.createEmbeddedDocuments("Wall", walls);
   }
 
-  if (tileLayers.floorTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", tileLayers.floorTiles);
+  if (validatedTileLayers.floorTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.floorTiles);
   }
 
-  if (tileLayers.propTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", tileLayers.propTiles);
+  if (validatedTileLayers.propTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.propTiles);
   }
 
   if (lights.length > 0) {
@@ -1459,6 +2006,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   }
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
+    generationMode: generationData.generationMode ?? "procedural",
     prompt,
     sceneSizeKey,
     theme,
@@ -1466,12 +2014,29 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     detected,
     useDetectedSettings,
     effectiveDetected,
+    aiPlan: generationData.aiPlan ?? null,
+    layoutGraph: generationData.layoutGraph ?? null,
+    compiledImagePrompt: generationData.compiledImagePrompt ?? null,
+    imageGeneration: generationData.imageGeneration ?? {
+      provider: getAiImageProvider(),
+      compiledPrompt: generationData.compiledImagePrompt ?? "",
+      imageStatus: "not-requested",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      }
+    },
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.2",
+    moduleVersion: "0.14.0",
     lastGeneratedAt: Date.now()
   });
+
+  if (generationData.imageGeneration) {
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, generationData.imageGeneration);
+  }
 }
 
 /**
@@ -2059,6 +2624,73 @@ function rectOverlapsWalls(rect, walls, wallPadding = 0) {
 }
 
 /**
+ * Built-in fallback mode for missing placeholder assets.
+ * Currently we skip missing-image tiles so scenes stay clean.
+ */
+async function applyTileFallbackModeToTileLayers(tileLayers) {
+  if (TILE_FALLBACK_MODE !== "skip-missing") {
+    return tileLayers;
+  }
+
+  return {
+    floorTiles: await filterTilesWithAvailableAssets(tileLayers.floorTiles),
+    propTiles: await filterTilesWithAvailableAssets(tileLayers.propTiles)
+  };
+}
+
+/**
+ * Keep only tiles whose texture source can be fetched by the client.
+ * Missing paths are skipped to avoid Foundry warning triangle icons.
+ */
+async function filterTilesWithAvailableAssets(tiles) {
+  const kept = [];
+  for (const tile of tiles) {
+    const src = tile?.texture?.src;
+    const exists = await isAssetPathAvailable(src);
+    if (!exists) {
+      debugLog("Skipping tile with missing asset path", src);
+      continue;
+    }
+    kept.push(tile);
+  }
+  return kept;
+}
+
+/**
+ * Resolve and cache asset path availability.
+ */
+async function isAssetPathAvailable(src) {
+  if (!src || typeof src !== "string") return false;
+  if (src.startsWith("data:")) return true;
+  if (ASSET_PATH_AVAILABILITY_CACHE.has(src)) {
+    return ASSET_PATH_AVAILABILITY_CACHE.get(src);
+  }
+
+  const exists = await probeAssetPath(src);
+  ASSET_PATH_AVAILABILITY_CACHE.set(src, exists);
+  return exists;
+}
+
+/**
+ * Probe a path using lightweight fetch checks.
+ */
+async function probeAssetPath(src) {
+  try {
+    const headResponse = await fetch(src, { method: "HEAD", cache: "no-store" });
+    if (headResponse.ok) return true;
+  } catch (_error) {
+    // Ignore and fallback to GET probe below.
+  }
+
+  try {
+    const getResponse = await fetch(src, { method: "GET", cache: "no-store" });
+    return getResponse.ok;
+  } catch (_error) {
+    return false;
+  }
+}
+
+/**
  * Build themed ambient lights with deterministic variation.
  */
 function buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, detected) {
@@ -2211,6 +2843,313 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 <p><strong>Generation Mode:</strong> ${isRegeneration ? "Regenerated from scene flags" : "Initial generation"}</p>
 <p>This layout is deterministic and local-only. No external AI API calls are used.</p>
   `.trim();
+}
+
+/**
+ * Parse an "AI planner" map plan from natural language using local rules only.
+ * No external APIs are called.
+ */
+function parseAiMapPlan(prompt) {
+  const text = String(prompt ?? "").toLowerCase();
+  const has = (phrase) => text.includes(phrase);
+  const matched = (keywords) => keywords.filter((k) => has(k));
+
+  const matchedBiomes = matched(AI_PLANNER_BIOMES);
+  const matchedThemes = matched(AI_PLANNER_THEMES);
+  const matchedTerrain = matched(AI_PLANNER_TERRAIN_FEATURES);
+  const matchedLighting = matched(AI_PLANNER_LIGHTING_MOODS);
+
+  const biome = matchedBiomes[0] ?? "forest";
+  const themeRoot = matchedThemes[0] ?? "ruins";
+  const theme = `${biome}_${themeRoot}`;
+
+  const roomCountHint = detectCountFromPrompt(text, ["rooms", "room"], 0);
+  const sideRoomCount = detectCountFromPrompt(text, ["side rooms", "side room"], has("side room") ? 2 : 0);
+
+  const rooms = [];
+  if (has("boss room")) {
+    rooms.push({ type: "boss_room", position: detectDirectionalPosition(text, "boss room", "north") });
+  }
+  if (sideRoomCount > 0 || has("side room")) {
+    rooms.push({ type: "side_room", count: Math.max(1, sideRoomCount || 2) });
+  }
+  if (has("hidden room")) {
+    rooms.push({ type: "hidden_room", position: detectDirectionalPosition(text, "hidden room", "east") });
+  }
+  if (has("puzzle room")) {
+    rooms.push({ type: "puzzle_room", position: detectDirectionalPosition(text, "puzzle room", "west") });
+  }
+
+  const baseRoomCount = roomCountHint > 0 ? roomCountHint : 3;
+  const roomCount = Math.max(
+    baseRoomCount,
+    rooms.reduce((sum, room) => sum + (Number(room.count) || 1), 0)
+  );
+
+  const mapSize = roomCount >= 6 || matchedTerrain.length >= 5 ? "large" : (roomCount <= 2 ? "small" : "medium");
+  const estimatedGrid = {
+    small: "30x30",
+    medium: "50x50",
+    large: "70x70"
+  }[mapSize] ?? "50x50";
+
+  const lightingMood = matchedLighting[0] ?? (has("torch") || has("torches") ? "torchlit" : "dim");
+  const terrainFeatures = dedupeKeywords(matchedTerrain);
+  const compositionNotes = buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood });
+
+  return {
+    theme,
+    biome,
+    style: "inkarnate",
+    mapSize,
+    estimatedGrid,
+    roomCount,
+    rooms,
+    terrainFeatures,
+    lightingMood,
+    compositionNotes
+  };
+}
+
+/**
+ * Phase 2:
+ * Build a deterministic layout graph from AI planner output + seed.
+ */
+function buildLayoutGraphFromPlan(plan, seed) {
+  const rng = createSeededRng(`${seed}|layout-graph|${JSON.stringify(plan)}`);
+  const positions = ["north", "east", "west", "south", "center", "north-east", "north-west"];
+  const entrancePosition = ["south", "west", "east"][randomInt(rng, 0, 2)];
+
+  const nodes = [
+    { id: "entrance", type: "entrance", position: entrancePosition },
+    { id: "central_area", type: "central_area", position: "center" }
+  ];
+  const edges = [
+    { from: "entrance", to: "central_area" }
+  ];
+
+  const sidePositionOrder = ["east", "west", "north-east", "north-west", "south-east", "south-west"];
+  let sidePositionIndex = 0;
+
+  for (const room of plan.rooms ?? []) {
+    if (room.type === "side_room") {
+      const count = Math.max(1, Number(room.count) || 1);
+      for (let i = 0; i < count; i += 1) {
+        const position = sidePositionOrder[(sidePositionIndex + i) % sidePositionOrder.length];
+        const id = `side_room_${position.replace(/[^a-z]/g, "_")}_${i + 1}`;
+        nodes.push({ id, type: "side_room", position });
+        edges.push({ from: "central_area", to: id });
+      }
+      sidePositionIndex += count;
+      continue;
+    }
+
+    const baseId = room.type || "room";
+    const id = baseId === "boss_room" ? "boss_room" : `${baseId}_${nodes.length}`;
+    const defaultPosition = baseId === "boss_room" ? "north" : positions[randomInt(rng, 0, positions.length - 1)];
+    const position = room.position ?? defaultPosition;
+    nodes.push({ id, type: baseId, position });
+    edges.push({ from: "central_area", to: id });
+  }
+
+  if (!nodes.some((node) => node.type === "boss_room")) {
+    nodes.push({ id: "boss_room", type: "boss_room", position: "north" });
+    edges.push({ from: "central_area", to: "boss_room" });
+  }
+
+  const terrainAnchors = buildTerrainAnchorsFromPlan(plan, rng);
+
+  return {
+    nodes,
+    edges,
+    terrainAnchors
+  };
+}
+
+/**
+ * Convert terrain features into deterministic anchor descriptors for graph + prompt.
+ */
+function buildTerrainAnchorsFromPlan(plan, rng) {
+  const anchors = [];
+  const features = plan.terrainFeatures ?? [];
+
+  const riverPathOptions = ["north_south", "east_west", "diagonal"];
+  if (features.includes("river")) {
+    anchors.push({
+      type: "river",
+      path: riverPathOptions[randomInt(rng, 0, riverPathOptions.length - 1)]
+    });
+  }
+  if (features.includes("bridge")) {
+    anchors.push({ type: "bridge", position: "center" });
+  }
+  if (features.includes("waterfall")) {
+    anchors.push({ type: "waterfall", position: "north" });
+  }
+  if (features.includes("lava")) {
+    anchors.push({ type: "lava", path: "south_arc" });
+  }
+  if (features.includes("cliffs")) {
+    anchors.push({ type: "cliffs", position: "map_edges" });
+  }
+  if (features.includes("road")) {
+    anchors.push({ type: "road", path: "entrance_to_center" });
+  }
+  if (features.includes("docks")) {
+    anchors.push({ type: "docks", position: "south_edge" });
+  }
+
+  return anchors;
+}
+
+/**
+ * Compile a strict future-facing image prompt using the AI planner output.
+ * This is preview-only text now; no external image generation is called.
+ */
+function compileInkarnatePrompt(plan, layoutGraph = null) {
+  const roomSummary = plan.rooms.map((room) => {
+    const position = room.position ? ` at ${room.position}` : "";
+    const count = room.count ? ` x${room.count}` : "";
+    return `${room.type}${count}${position}`;
+  }).join(", ");
+
+  const terrainSummary = plan.terrainFeatures.join(", ") || "none";
+  const noteSummary = plan.compositionNotes.join("; ") || "balanced composition";
+  const graphSummary = layoutGraph
+    ? summarizeLayoutGraphForPrompt(layoutGraph)
+    : "layout graph not provided";
+
+  return `
+TRUE TOP DOWN VTT BATTLE MAP.
+90 DEGREE ORTHOGRAPHIC CAMERA.
+GRIDLESS.
+INKARNATE STYLE.
+HIGH DETAIL HAND PAINTED FANTASY MAP.
+NO CHARACTERS.
+NO TEXT.
+NO LABELS.
+NO ISOMETRIC.
+NO PERSPECTIVE CAMERA.
+Biome: ${plan.biome}.
+Theme: ${plan.theme}.
+Map size: ${plan.mapSize} (${plan.estimatedGrid}).
+Lighting mood: ${plan.lightingMood}.
+Rooms: ${roomSummary || "none"}.
+Terrain features: ${terrainSummary}.
+Layout graph: ${graphSummary}.
+Composition: ${noteSummary}.
+  `.trim();
+}
+
+function summarizeLayoutGraphForPrompt(layoutGraph) {
+  const entrance = layoutGraph.nodes.find((node) => node.type === "entrance");
+  const bossRoom = layoutGraph.nodes.find((node) => node.type === "boss_room");
+  const sideRooms = layoutGraph.nodes.filter((node) => node.type === "side_room");
+  const river = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "river");
+  const bridge = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "bridge");
+
+  const parts = [];
+  if (entrance) parts.push(`entrance in ${entrance.position}`);
+  if (bossRoom) parts.push(`boss room in ${bossRoom.position}`);
+  if (sideRooms.length > 0) {
+    const positions = sideRooms.map((room) => room.position).join(" and ");
+    parts.push(`side rooms ${positions}`);
+  }
+  if (river) parts.push(`river runs ${river.path} through center`);
+  if (bridge) parts.push(`bridge crosses river ${bridge.position}`);
+
+  return parts.join("; ") || "central area with branching encounters";
+}
+
+/**
+ * Map AI planner theme output into SceneForge's current supported themes.
+ */
+function mapAiPlanThemeToSceneTheme(plan) {
+  const themeText = `${plan.theme} ${plan.biome}`.toLowerCase();
+  if (themeText.includes("tavern") || themeText.includes("village") || themeText.includes("camp")) return "tavern";
+  if (themeText.includes("cave") || themeText.includes("underground") || themeText.includes("sewer")) return "cave";
+  if (themeText.includes("forest") || themeText.includes("jungle") || themeText.includes("ruins") || themeText.includes("temple")) return "forest-ruins";
+  return "dungeon";
+}
+
+function mapAiPlanSizeToSceneSizeKey(mapSize) {
+  if (mapSize === "small" || mapSize === "large" || mapSize === "medium") return mapSize;
+  return "medium";
+}
+
+function mapAiPlanLightingToSceneLighting(lightingMood) {
+  if (["bright", "dim", "dark", "magical"].includes(lightingMood)) return lightingMood;
+  if (lightingMood === "torchlit") return "dim";
+  return "dim";
+}
+
+/**
+ * Apply AI plan room/terrain hints into existing feature toggles.
+ */
+function applyAiPlanFeaturesToDetected(detected, plan) {
+  const clone = foundry.utils.deepClone(detected ?? parsePromptForSceneSettings(""));
+  const roomTypes = (plan.rooms ?? []).map((room) => room.type);
+  const terrain = plan.terrainFeatures ?? [];
+
+  clone.features.bossRoom = clone.features.bossRoom || roomTypes.includes("boss_room");
+  clone.features.hiddenRoom = clone.features.hiddenRoom || roomTypes.includes("hidden_room") || terrain.includes("hidden room");
+  clone.features.sideRooms = clone.features.sideRooms || roomTypes.includes("side_room") || terrain.includes("side rooms");
+  const plannedSideRoom = plan.rooms.find((room) => room.type === "side_room");
+  if (plannedSideRoom?.count) clone.features.sideRoomsCount = Number(plannedSideRoom.count);
+  clone.features.pillars = clone.features.pillars || terrain.includes("pillars");
+  clone.features.altar = clone.features.altar || terrain.includes("altar");
+  clone.features.treasure = clone.features.treasure || terrain.includes("treasure");
+  clone.features.cells = clone.features.cells || terrain.includes("prison cells");
+
+  return clone;
+}
+
+/**
+ * Human-readable AI plan bullet summary for preview mode.
+ */
+function buildAiPlanReadableSummary(plan) {
+  const terrainSummary = plan.terrainFeatures.length > 0 ? plan.terrainFeatures.join(", ") : "none";
+  const roomSummary = plan.rooms.length > 0
+    ? plan.rooms.map((room) => room.count ? `${room.type} x${room.count}` : room.type).join(", ")
+    : "none";
+  return [
+    `Biome: ${plan.biome}`,
+    `Theme: ${plan.theme}`,
+    `Style: ${plan.style}`,
+    `Map Size: ${plan.mapSize} (${plan.estimatedGrid})`,
+    `Room Count: ${plan.roomCount}`,
+    `Lighting Mood: ${plan.lightingMood}`,
+    `Rooms: ${roomSummary}`,
+    `Terrain: ${terrainSummary}`
+  ];
+}
+
+function buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood }) {
+  const notes = [];
+  if (terrainFeatures.includes("river")) notes.push("river runs through center");
+  if (rooms.some((room) => room.type === "boss_room")) notes.push("boss room in northern section");
+  if (rooms.some((room) => room.type === "side_room")) notes.push("side rooms east and west");
+  if (terrainFeatures.includes("bridge")) notes.push("bridge connects key traversal points");
+  if (terrainFeatures.includes("hidden room")) notes.push("hidden chamber tucked off main route");
+  if (notes.length === 0) {
+    notes.push(`${biome} composition with ${lightingMood} mood and readable encounter flow`);
+  }
+  if (text.includes("center")) notes.push("center area should host a major focal set piece");
+  return dedupeKeywords(notes);
+}
+
+function detectDirectionalPosition(text, subject, fallback = "center") {
+  const index = text.indexOf(subject);
+  if (index === -1) return fallback;
+  const windowStart = Math.max(0, index - 40);
+  const windowEnd = Math.min(text.length, index + subject.length + 40);
+  const segment = text.slice(windowStart, windowEnd);
+  if (segment.includes("north")) return "north";
+  if (segment.includes("south")) return "south";
+  if (segment.includes("east")) return "east";
+  if (segment.includes("west")) return "west";
+  if (segment.includes("center")) return "center";
+  return fallback;
 }
 
 /**
