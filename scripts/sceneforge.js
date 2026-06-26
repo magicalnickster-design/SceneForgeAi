@@ -758,7 +758,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.15.0"
+    moduleVersion: "0.16.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1657,7 +1657,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.15.0",
+    version: generationData.moduleVersion ?? "0.16.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-planner",
@@ -1800,7 +1800,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.15.0"
+    moduleVersion: "0.16.0"
   };
 
   return {
@@ -2116,7 +2116,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers,
     seed,
-    moduleVersion: "0.15.0",
+    moduleVersion: "0.16.0",
     lastGeneratedAt: Date.now()
   });
 
@@ -3101,38 +3101,118 @@ function buildTerrainAnchorsFromPlan(plan, rng) {
  * This is preview-only text now; no external image generation is called.
  */
 function compileInkarnatePrompt(plan, layoutGraph = null) {
-  const roomSummary = plan.rooms.map((room) => {
-    const position = room.position ? ` at ${room.position}` : "";
+  const toTitle = (value) => String(value ?? "").replace(/_/g, " ").trim();
+  const hasTerrain = (value) => (plan.terrainFeatures ?? []).includes(value);
+  const themeText = `${plan.theme} ${plan.biome}`.toLowerCase();
+
+  const roomSummary = (plan.rooms ?? []).map((room) => {
     const count = room.count ? ` x${room.count}` : "";
-    return `${room.type}${count}${position}`;
+    return `${toTitle(room.type)}${count}`;
   }).join(", ");
 
-  const terrainSummary = plan.terrainFeatures.join(", ") || "none";
-  const noteSummary = plan.compositionNotes.join("; ") || "balanced composition";
-  const graphSummary = layoutGraph
-    ? summarizeLayoutGraphForPrompt(layoutGraph)
-    : "layout graph not provided";
+  const terrainType = (() => {
+    if (themeText.includes("forest") || themeText.includes("jungle")) return "lush forest floor with ancient ruin stonework";
+    if (themeText.includes("desert")) return "sun-baked sand, weathered flagstones, and dusty rock shelves";
+    if (themeText.includes("swamp")) return "muddy wetland ground with mossy roots and saturated soil";
+    if (themeText.includes("snow")) return "frosted earth, icy stone, and wind-carved drifts";
+    if (themeText.includes("volcanic") || hasTerrain("lava")) return "charred volcanic rock, ash, and heat-scorched masonry";
+    if (themeText.includes("cave") || themeText.includes("underground")) return "carved cavern stone, damp mineral surfaces, and worn dungeon pathways";
+    return "weathered fantasy terrain with believable natural wear";
+  })();
 
-  return `
-TRUE TOP DOWN VTT BATTLE MAP.
-90 DEGREE ORTHOGRAPHIC CAMERA.
-GRIDLESS.
-INKARNATE STYLE.
-HIGH DETAIL HAND PAINTED FANTASY MAP.
-NO CHARACTERS.
-NO TEXT.
-NO LABELS.
-NO ISOMETRIC.
-NO PERSPECTIVE CAMERA.
-Biome: ${plan.biome}.
-Theme: ${plan.theme}.
-Map size: ${plan.mapSize} (${plan.estimatedGrid}).
-Lighting mood: ${plan.lightingMood}.
-Rooms: ${roomSummary || "none"}.
-Terrain features: ${terrainSummary}.
-Layout graph: ${graphSummary}.
-Composition: ${noteSummary}.
-  `.trim();
+  const vegetationDensity = (() => {
+    if (themeText.includes("forest") || themeText.includes("jungle")) return "dense mossy vegetation, creeping vines, and root overgrowth around ruins";
+    if (themeText.includes("swamp")) return "thick reeds, low marsh plants, and patchy overgrown banks";
+    if (themeText.includes("desert") || themeText.includes("volcanic")) return "sparse hardy vegetation with clear exposed terrain";
+    return "moderate natural growth focused near edges and broken structures";
+  })();
+
+  const pathSystem = (() => {
+    if (hasTerrain("road")) return "ancient cracked stone pathways connecting key combat zones";
+    if (hasTerrain("bridge") || hasTerrain("river")) return "clear traversal routes toward crossing points and flanking lanes";
+    return "clear primary and secondary paths with readable encounter circulation";
+  })();
+
+  const elevation = (() => {
+    if (hasTerrain("cliffs")) return "layered elevation shelves with cliff edges, ramps, and tactical high ground";
+    if (hasTerrain("waterfall")) return "subtle elevation rise feeding a waterfall edge and lower basin";
+    return "gentle elevation variation for depth without blocking map readability";
+  })();
+
+  const waterFeatures = (() => {
+    if (hasTerrain("waterfall")) return "shallow stream crossing beneath a weathered waterfall lip";
+    if (hasTerrain("river")) return "narrow stream channels with natural crossing points and wet shoreline detail";
+    if (hasTerrain("pond") || hasTerrain("lake")) return "still water pockets with shoreline vegetation and reflective highlights";
+    if (hasTerrain("lava")) return "glowing lava channels replacing water with hazardous molten flow";
+    return "minimal water focus, prioritizing dry tactical movement";
+  })();
+
+  const architectureStyle = (() => {
+    if (themeText.includes("ruins") || themeText.includes("temple")) {
+      return "broken temple walls, collapsed pillars, fractured arches, and carved stone relic fragments";
+    }
+    if (themeText.includes("dungeon") || themeText.includes("crypt")) {
+      return "aged dungeon masonry, reinforced chambers, cracked corridors, and ritual stonework";
+    }
+    if (themeText.includes("castle") || themeText.includes("fortress")) {
+      return "fortified stone architecture with damaged battlement remains and defensive geometry";
+    }
+    if (themeText.includes("village") || themeText.includes("camp") || themeText.includes("tavern")) {
+      return "frontier settlement structures with practical timber-stone construction and worn ground detail";
+    }
+    return "cohesive fantasy architecture with believable ruin and weathering detail";
+  })();
+
+  const losBlockers = (() => {
+    const blockers = [];
+    if (hasTerrain("pillars")) blockers.push("standing and collapsed pillars");
+    if (hasTerrain("trees")) blockers.push("tree trunks and heavy roots");
+    if (hasTerrain("cliffs")) blockers.push("rock outcrops and cliff protrusions");
+    if (hasTerrain("rubble") || themeText.includes("ruins")) blockers.push("scattered rubble and broken wall segments");
+    return blockers.length > 0 ? blockers.join(", ") : "intentional stone debris clusters and natural blockers";
+  })();
+
+  const storytelling = (() => {
+    const notes = [];
+    if (hasTerrain("altar")) notes.push("a worn ritual focal point with surrounding debris");
+    if (hasTerrain("treasure")) notes.push("subtle treasure-site storytelling through ruined containers and relic fragments");
+    if ((plan.rooms ?? []).some((room) => room.type === "boss_room")) notes.push("a dramatic central encounter zone with readable approach lanes");
+    if ((plan.rooms ?? []).some((room) => room.type === "hidden_room")) notes.push("a hinted concealed section suggested by broken masonry and offset pathways");
+    return notes.length > 0 ? notes.join("; ") : "environmental storytelling through ruin damage, weathering, and traversal wear";
+  })();
+
+  const graphGuidance = layoutGraph ? summarizeLayoutGraphForPrompt(layoutGraph) : "no explicit graph guidance";
+  const compositionNotes = (plan.compositionNotes ?? []).join("; ") || "balanced composition with strong gameplay readability";
+
+  return [
+    "TRUE TOP DOWN BATTLE MAP.",
+    "90 DEGREE ORTHOGRAPHIC CAMERA.",
+    "GRIDLESS.",
+    "DUNGEONS AND DRAGONS VTT MAP.",
+    "HAND PAINTED INKARNATE STYLE.",
+    "HIGH DETAIL ENVIRONMENT TEXTURES.",
+    "PROFESSIONAL FANTASY CARTOGRAPHY.",
+    "NO CHARACTERS.",
+    "NO TEXT.",
+    "NO LABELS.",
+    "NO UI ELEMENTS.",
+    "NO ISOMETRIC.",
+    "NO PERSPECTIVE CAMERA.",
+    "NO CINEMATIC ANGLES.",
+    `Biome and setting: ${plan.biome}, ${plan.theme}, ${plan.mapSize} scale (${plan.estimatedGrid}), ${plan.lightingMood} mood.`,
+    `Terrain direction: ${terrainType}.`,
+    `Vegetation density: ${vegetationDensity}.`,
+    `Road and path system: ${pathSystem}.`,
+    `Elevation language: ${elevation}.`,
+    `Water feature treatment: ${waterFeatures}.`,
+    `Architectural style: ${architectureStyle}.`,
+    `Encounter readability: open combat clearings, clear walkable spaces, clean lane readability, and deliberate chokepoints.`,
+    `Line-of-sight blockers: ${losBlockers}.`,
+    `Environmental storytelling: ${storytelling}.`,
+    `Planned encounter program: ${roomSummary || "primary encounter spaces with supporting side areas"}.`,
+    `Creative intent notes: ${compositionNotes}.`,
+    `Layout graph is guidance only, prioritize beauty and painterly composition over strict graph fidelity: ${graphGuidance}.`
+  ].join("\n");
 }
 
 function summarizeLayoutGraphForPrompt(layoutGraph) {
