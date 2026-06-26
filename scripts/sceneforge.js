@@ -17,6 +17,8 @@ const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const DEBUG = false;
 const TILE_FALLBACK_MODE = "skip-missing";
+// Temporary product-focus switch: disable all spawned tile/prop/pack assets.
+const ENABLE_ASSET_SPAWNING = false;
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -828,16 +830,18 @@ function buildGenerationPreviewData(config) {
 
   const rng = createSeededRng(`${generationData.seed}|${generationData.theme}|${generationData.sceneSizeKey}|${generationData.prompt}`);
   const walls = buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected);
-  const tiles = buildThemeTiles(
-    generationData.theme,
-    widthPx,
-    heightPx,
-    walls,
-    rng,
-    generationData.seed,
-    generationData.effectiveDetected,
-    generationData.enabledAssetPacks
-  );
+  const tiles = ENABLE_ASSET_SPAWNING
+    ? buildThemeTiles(
+      generationData.theme,
+      widthPx,
+      heightPx,
+      walls,
+      rng,
+      generationData.seed,
+      generationData.effectiveDetected,
+      generationData.enabledAssetPacks
+    )
+    : { floorTiles: [], propTiles: [] };
   const lights = buildThemeLights(
     generationData.theme,
     widthPx,
@@ -853,7 +857,14 @@ function buildGenerationPreviewData(config) {
     .map((key) => formatFeatureLabel(key, generationData.effectiveDetected.features));
 
   const estimatedNotes = 1 + (generationData.effectiveDetected?.features?.treasure ? 1 : 0);
-  const packContribution = estimateAssetPackContribution(tiles);
+  const packContribution = ENABLE_ASSET_SPAWNING
+    ? estimateAssetPackContribution(tiles)
+    : {
+      base: 0,
+      "premium-tavern": 0,
+      "dark-dungeon": 0,
+      "rune-ruins": 0
+    };
   const featureImpact = estimateFeatureImpact(generationData);
   debugLog("Preview estimates", {
     theme: generationData.theme,
@@ -2036,8 +2047,11 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const activePackIds = Array.isArray(generationData.enabledAssetPacks)
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
-  const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
-  const validatedTiles = await applyTileFallbackModeToTileLayers(tileLayers);
+  let validatedTiles = [];
+  if (ENABLE_ASSET_SPAWNING) {
+    const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
+    validatedTiles = await applyTileFallbackModeToTileLayers(tileLayers);
+  }
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -2133,6 +2147,10 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await safeEmbeddedCreate(scene, "Note", notesToCreate, "generateSceneLayout.Note.createEmbeddedDocuments");
   }
 
+  const generationLayers = ENABLE_ASSET_SPAWNING
+    ? ["walls", "floor-assets", "props", "lighting", "notes"]
+    : ["walls", "lighting", "notes"];
+
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
     generationMode: generationData.generationMode ?? "procedural",
     prompt,
@@ -2156,7 +2174,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
       }
     },
     enabledAssetPacks: activePackIds,
-    generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
+    generationLayers,
     seed,
     moduleVersion: "0.14.4",
     lastGeneratedAt: Date.now()
