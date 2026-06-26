@@ -231,6 +231,18 @@ function getEnabledAssetPackIds() {
 }
 
 /**
+ * Requirement helper:
+ * Compare preset.required packs against currently enabled packs.
+ */
+function getMissingPresetPacks(preset) {
+  const requiredPacks = Array.isArray(preset?.enabledAssetPacks)
+    ? preset.enabledAssetPacks.filter((v) => typeof v === "string")
+    : [];
+  const enabledNow = getEnabledAssetPackIds();
+  return requiredPacks.filter((packId) => !enabledNow.includes(packId));
+}
+
+/**
  * Clone registry and decorate each asset with pack metadata.
  */
 function cloneRegistryWithPackMeta(registry, packId) {
@@ -470,7 +482,7 @@ async function handleGenerate(dialogHtml) {
     effectiveDetected,
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.7.0"
+    moduleVersion: "0.8.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -716,7 +728,21 @@ async function promptImportPresetFile() {
         return;
       }
 
-      await importPresetAsNewScene(validation.generationData, validation.sourceVersion);
+      const missingPacks = getMissingPresetPacks(validation.generationData);
+      let importWithMissingPacks = false;
+      if (missingPacks.length > 0) {
+        const shouldImport = await promptMissingPacksWarningDialog(missingPacks);
+        if (!shouldImport) return;
+        importWithMissingPacks = true;
+
+        // Fallback behavior: use only packs currently enabled in this world.
+        validation.generationData.enabledAssetPacks = validation.generationData.enabledAssetPacks
+          .filter((packId) => !missingPacks.includes(packId));
+      }
+
+      await importPresetAsNewScene(validation.generationData, validation.sourceVersion, {
+        missingPacks: importWithMissingPacks ? missingPacks : []
+      });
       ui.notifications.info("SceneForge AI: Preset imported successfully.");
     } catch (error) {
       console.error(`${MODULE_ID} | Preset import failed`, error);
@@ -728,13 +754,46 @@ async function promptImportPresetFile() {
 }
 
 /**
+ * If a preset needs packs that are not enabled, ask whether to continue.
+ */
+function promptMissingPacksWarningDialog(missingPacks) {
+  return new Promise((resolve) => {
+    const listHtml = missingPacks.map((id) => `<li>${foundry.utils.escapeHTML(id)}</li>`).join("");
+    const dialog = new Dialog({
+      title: "SceneForge Preset Warning",
+      content: `
+<p>This preset was built with packs you do not currently have enabled.</p>
+<p><strong>Missing Packs:</strong></p>
+<ul>${listHtml}</ul>
+<p>You can import anyway and SceneForge will use fallback base assets for missing premium content.</p>
+      `,
+      buttons: {
+        importAnyway: {
+          icon: '<i class="fas fa-check"></i>',
+          label: "Import Anyway",
+          callback: () => resolve(true)
+        },
+        cancel: {
+          icon: '<i class="fas fa-times"></i>',
+          label: "Cancel",
+          callback: () => resolve(false)
+        }
+      },
+      default: "cancel",
+      close: () => resolve(false)
+    });
+    dialog.render(true);
+  });
+}
+
+/**
  * Build a portable preset payload that can be shared or published.
  */
 function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.7.0",
+    version: generationData.moduleVersion ?? "0.8.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -841,7 +900,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.7.0"
+    moduleVersion: "0.8.0"
   };
 
   return {
@@ -854,7 +913,8 @@ function validateImportedPreset(rawPreset) {
 /**
  * Create a new scene from normalized preset data and generate full layout.
  */
-async function importPresetAsNewScene(generationData, sourceVersion = "unknown") {
+async function importPresetAsNewScene(generationData, sourceVersion = "unknown", options = {}) {
+  const { missingPacks = [] } = options;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
   const heightPx = gridCells * GRID_SIZE_PX;
@@ -877,7 +937,8 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown")
       [MODULE_ID]: {
         [FLAG_GENERATION_KEY]: {
           ...generationData,
-          importedFromPresetVersion: sourceVersion
+          importedFromPresetVersion: sourceVersion,
+          missingPresetPacks: missingPacks
         }
       }
     }
@@ -888,6 +949,64 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown")
   }
 
   await generateSceneLayout(scene, generationData);
+
+  if (missingPacks.length > 0) {
+    await createMissingPackWarningJournalNote(scene, missingPacks);
+  }
+}
+
+/**
+ * If import proceeds without required packs, drop a warning journal note in scene.
+ */
+async function createMissingPackWarningJournalNote(scene, missingPacks) {
+  const content = `
+<h2>SceneForge Import Warning</h2>
+<p>This preset was built with asset packs not currently enabled:</p>
+<ul>${missingPacks.map((id) => `<li>${foundry.utils.escapeHTML(id)}</li>`).join("")}</ul>
+<p>SceneForge imported anyway and used base/fallback assets where premium assets were missing.</p>
+  `.trim();
+
+  const journal = await JournalEntry.create({
+    name: `SceneForge Warning - ${scene.name}`,
+    pages: [
+      {
+        name: "Missing Asset Packs",
+        type: "text",
+        text: {
+          format: 1,
+          content
+        }
+      }
+    ],
+    flags: {
+      [MODULE_ID]: {
+        [FLAG_GENERATED_KEY]: true,
+        sceneId: scene.id,
+        warningType: "missing-packs"
+      }
+    }
+  });
+
+  const firstPage = journal?.pages?.contents?.[0];
+  if (!firstPage) return;
+
+  await scene.createEmbeddedDocuments("Note", [
+    {
+      x: Math.floor(scene.width * 0.2),
+      y: Math.floor(scene.height * 0.2),
+      entryId: journal.id,
+      pageId: firstPage.id,
+      iconSize: 40,
+      text: "SceneForge Missing Packs Warning",
+      flags: {
+        [MODULE_ID]: {
+          [FLAG_GENERATED_KEY]: true,
+          kind: "note",
+          noteType: "missing-packs-warning"
+        }
+      }
+    }
+  ]);
 }
 
 /**
@@ -1076,7 +1195,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.7.0",
+    moduleVersion: "0.8.0",
     lastGeneratedAt: Date.now()
   });
 }
