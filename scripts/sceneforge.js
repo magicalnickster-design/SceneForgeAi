@@ -15,12 +15,15 @@ const GRID_SIZE_PX = 100;
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
+const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
 const DEBUG = false;
 const TILE_FALLBACK_MODE = "skip-missing";
 // Temporary product-focus switch: disable all spawned tile/prop/pack assets.
 const ENABLE_ASSET_SPAWNING = false;
 // Test isolation switch: disable all SceneForge journals and notes.
 const ENABLE_JOURNALS_AND_NOTES = false;
+// Product decision: do not generate procedural walls/lights over AI maps.
+const ENABLE_SCENE_WALLS_AND_LIGHTS = false;
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -320,6 +323,7 @@ const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
 const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
 const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
 const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
+const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 
 /**
  * Base registry ships with the core module.
@@ -532,6 +536,19 @@ function registerAssetPackSettings() {
     },
     restricted: true
   });
+
+  // Hidden image dump metadata used for prompt-matched reuse and voting.
+  game.settings.register(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY, {
+    name: "Image Dump Library",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {
+      version: 1,
+      entries: []
+    },
+    restricted: true
+  });
 }
 
 /**
@@ -620,6 +637,183 @@ function getCurrentUsageMonthKey() {
   const now = new Date();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   return `${now.getUTCFullYear()}-${month}`;
+}
+
+function normalizePromptForReuse(prompt) {
+  return String(prompt ?? "").trim();
+}
+
+function getImageDumpLibrary() {
+  const raw = game.settings.get(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY);
+  if (!raw || typeof raw !== "object") {
+    return { version: 1, entries: [] };
+  }
+  const entries = Array.isArray(raw.entries) ? raw.entries : [];
+  return { version: 1, entries };
+}
+
+async function setImageDumpLibrary(library) {
+  await game.settings.set(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY, {
+    version: 1,
+    entries: Array.isArray(library?.entries) ? library.entries : []
+  });
+}
+
+function getPlanCategoryKey(plan) {
+  const biome = String(plan?.biome ?? "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const theme = String(plan?.theme ?? "general").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  return `${biome}/${theme}`;
+}
+
+function scoreImageDumpEntry(entry) {
+  return Number(entry?.likes ?? 0) - Number(entry?.dislikes ?? 0);
+}
+
+function findReusableImageEntryForPrompt(prompt) {
+  const promptExact = normalizePromptForReuse(prompt);
+  if (!promptExact) return null;
+  const library = getImageDumpLibrary();
+  const candidates = library.entries.filter((entry) =>
+    entry?.promptExact === promptExact
+    && typeof entry?.imagePath === "string"
+    && entry.imagePath.trim().length > 0
+    && Number(entry.dislikes ?? 0) <= Number(entry.likes ?? 0)
+  );
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    const scoreDelta = scoreImageDumpEntry(b) - scoreImageDumpEntry(a);
+    if (scoreDelta !== 0) return scoreDelta;
+    return Number(b?.createdAt ?? 0) - Number(a?.createdAt ?? 0);
+  });
+  return candidates[0];
+}
+
+async function upsertImageDumpEntry(entry) {
+  const library = getImageDumpLibrary();
+  const entries = [...library.entries];
+  const id = entry?.id || foundry.utils.randomID();
+  const normalizedEntry = {
+    id,
+    promptExact: normalizePromptForReuse(entry?.promptExact ?? ""),
+    imagePath: String(entry?.imagePath ?? "").trim(),
+    categoryKey: String(entry?.categoryKey ?? "unknown/general"),
+    provider: String(entry?.provider ?? "unknown"),
+    seed: String(entry?.seed ?? ""),
+    sceneId: entry?.sceneId ?? null,
+    compiledPrompt: String(entry?.compiledPrompt ?? ""),
+    likes: Number(entry?.likes ?? 0),
+    dislikes: Number(entry?.dislikes ?? 0),
+    votes: entry?.votes && typeof entry.votes === "object" ? entry.votes : {},
+    createdAt: Number(entry?.createdAt ?? Date.now()),
+    updatedAt: Number(entry?.updatedAt ?? Date.now()),
+    lastUsedAt: Number(entry?.lastUsedAt ?? Date.now()),
+    usageCount: Number(entry?.usageCount ?? 0)
+  };
+
+  const existingIndex = entries.findIndex((item) => item?.id === id);
+  if (existingIndex >= 0) entries[existingIndex] = normalizedEntry;
+  else entries.push(normalizedEntry);
+
+  await setImageDumpLibrary({ version: 1, entries });
+  return normalizedEntry;
+}
+
+async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMetadata, imagePath, scene }) {
+  const promptExact = normalizePromptForReuse(generationData?.prompt ?? "");
+  if (!promptExact || !imagePath || !scene) return null;
+
+  const entry = await upsertImageDumpEntry({
+    promptExact,
+    imagePath,
+    categoryKey: getPlanCategoryKey(generationData?.aiPlan ?? null),
+    provider: imageGenerationMetadata?.provider ?? "unknown",
+    seed: generationData?.seed ?? "",
+    sceneId: scene.id,
+    compiledPrompt: generationData?.compiledImagePrompt ?? "",
+    likes: 0,
+    dislikes: 0,
+    votes: {},
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    lastUsedAt: Date.now(),
+    usageCount: 1
+  });
+  await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entry.id);
+  return entry;
+}
+
+async function markImageDumpEntryUsed(entryId, scene) {
+  if (!entryId) return;
+  const library = getImageDumpLibrary();
+  const entry = library.entries.find((item) => item?.id === entryId);
+  if (!entry) return;
+  const updated = {
+    ...entry,
+    sceneId: scene?.id ?? entry.sceneId,
+    usageCount: Number(entry.usageCount ?? 0) + 1,
+    lastUsedAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  await upsertImageDumpEntry(updated);
+  if (scene) {
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, updated.id);
+  }
+}
+
+async function voteOnSceneMap(scene, voteValue) {
+  const entryId = scene?.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
+  if (!entryId) {
+    ui.notifications.warn("SceneForge AI: No image dump entry found for this scene.");
+    return;
+  }
+  const userId = game.user?.id;
+  if (!userId) return;
+
+  const library = getImageDumpLibrary();
+  const entry = library.entries.find((item) => item?.id === entryId);
+  if (!entry) {
+    ui.notifications.warn("SceneForge AI: Image dump entry is missing.");
+    return;
+  }
+
+  const votes = { ...(entry.votes ?? {}) };
+  const previous = Number(votes[userId] ?? 0);
+  const next = Number(voteValue);
+  if (previous === next) {
+    ui.notifications.info("SceneForge AI: Your vote is already recorded.");
+    return;
+  }
+
+  let likes = Number(entry.likes ?? 0);
+  let dislikes = Number(entry.dislikes ?? 0);
+  if (previous === 1) likes = Math.max(0, likes - 1);
+  if (previous === -1) dislikes = Math.max(0, dislikes - 1);
+  if (next === 1) likes += 1;
+  if (next === -1) dislikes += 1;
+  votes[userId] = next;
+
+  await upsertImageDumpEntry({
+    ...entry,
+    likes,
+    dislikes,
+    votes,
+    updatedAt: Date.now()
+  });
+  ui.notifications.info(`SceneForge AI: Vote saved (${next === 1 ? "Liked" : "Disliked"}).`);
+}
+
+function getCategoryReferenceSummary(plan) {
+  const categoryKey = getPlanCategoryKey(plan);
+  const library = getImageDumpLibrary();
+  const categoryEntries = library.entries.filter((entry) =>
+    entry?.categoryKey === categoryKey
+    && Number(entry?.likes ?? 0) >= Number(entry?.dislikes ?? 0)
+  );
+  if (categoryEntries.length === 0) {
+    return "No prior rated category references yet.";
+  }
+  const highlyRated = categoryEntries.filter((entry) => Number(entry.likes ?? 0) > Number(entry.dislikes ?? 0));
+  return `Rated references available for ${categoryKey}: ${categoryEntries.length} (highly rated: ${highlyRated.length}).`;
 }
 
 /**
@@ -833,6 +1027,41 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
       await promptImportPresetFile();
     }
   });
+
+  entryOptions.push({
+    name: "SceneForge: Rate Map",
+    icon: '<i class="fas fa-thumbs-up"></i>',
+    condition: (li) => {
+      const scene = getSceneFromDirectoryLi(li);
+      return Boolean(scene?.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
+    },
+    callback: async (li) => {
+      const scene = getSceneFromDirectoryLi(li);
+      if (!scene) return;
+      const dialog = new Dialog({
+        title: "SceneForge: Rate Generated Map",
+        content: "<p>How do you rate this generated map for future reuse?</p>",
+        buttons: {
+          like: {
+            icon: '<i class="fas fa-thumbs-up"></i>',
+            label: "Like",
+            callback: async () => voteOnSceneMap(scene, 1)
+          },
+          dislike: {
+            icon: '<i class="fas fa-thumbs-down"></i>',
+            label: "Dislike",
+            callback: async () => voteOnSceneMap(scene, -1)
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Cancel"
+          }
+        },
+        default: "cancel"
+      });
+      dialog.render(true);
+    }
+  });
 });
 
 /**
@@ -1035,7 +1264,9 @@ function buildGenerationPreviewData(config) {
   const heightPx = gridCells * GRID_SIZE_PX;
 
   const rng = createSeededRng(`${generationData.seed}|${generationData.theme}|${generationData.sceneSizeKey}|${generationData.prompt}`);
-  const walls = buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected);
+  const walls = ENABLE_SCENE_WALLS_AND_LIGHTS
+    ? buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected)
+    : [];
   const tiles = ENABLE_ASSET_SPAWNING
     ? buildThemeTiles(
       generationData.theme,
@@ -1048,15 +1279,17 @@ function buildGenerationPreviewData(config) {
       generationData.enabledAssetPacks
     )
     : { floorTiles: [], propTiles: [] };
-  const lights = buildThemeLights(
-    generationData.theme,
-    widthPx,
-    heightPx,
-    rng,
-    generationData.seed,
-    generationData.lightingMood,
-    generationData.effectiveDetected
-  );
+  const lights = ENABLE_SCENE_WALLS_AND_LIGHTS
+    ? buildThemeLights(
+      generationData.theme,
+      widthPx,
+      heightPx,
+      rng,
+      generationData.seed,
+      generationData.lightingMood,
+      generationData.effectiveDetected
+    )
+    : [];
 
   const appliedFeatures = FEATURE_KEYS
     .filter((key) => generationData.effectiveDetected?.features?.[key])
@@ -1281,6 +1514,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       (activeProvider === "openai" && imageStatus === "complete")
       || (activeProvider === "mock" && imageStatus === "mock-generated")
       || (activeProvider === "subscription" && imageStatus === "complete")
+      || (activeProvider === "cache" && imageStatus === "reused")
     ) && Boolean(imagePath);
 
     if (!hasValidAiImage) {
@@ -1355,7 +1589,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         };
       }
 
-      if (activeProvider === "openai" && !persistedBackgroundPath) {
+      if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && !persistedBackgroundPath) {
         logImagePipelineError("background persistence failed", {
           provider: activeProvider,
           imagePath: backgroundPath,
@@ -1373,7 +1607,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       debugLog("Scene background after update", updatedBackgroundSrc);
       backgroundVerified = Boolean(persistedBackgroundPath) && backgroundApplyResult.applied;
 
-      if (!backgroundVerified && (activeProvider === "openai" || activeProvider === "subscription")) {
+      if (!backgroundVerified && (activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache")) {
         logImagePipelineError("background verification failed", {
           provider: activeProvider,
           imagePath: backgroundPath,
@@ -1397,6 +1631,19 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, resolvedGenerationData.imageGeneration);
     }
 
+    if (persistedBackgroundPath) {
+      if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
+        await markImageDumpEntryUsed(resolvedGenerationData.imageGeneration.cacheEntryId, scene);
+      } else if (resolvedGenerationData.imageGeneration?.provider !== "none") {
+        await recordGeneratedImageDumpEntry({
+          generationData: resolvedGenerationData,
+          imageGenerationMetadata: resolvedGenerationData.imageGeneration,
+          imagePath: persistedBackgroundPath,
+          scene
+        });
+      }
+    }
+
     await generateSceneLayout(scene, resolvedGenerationData);
 
     if (seedWasAutoGenerated) {
@@ -1407,7 +1654,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
     }
   } catch (error) {
-    if (activeProvider === "openai" && createdScene) {
+    if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && createdScene) {
       logImagePipelineError("scene creation failed after OpenAI image generation", {
         provider: activeProvider,
         sceneId: createdScene?.id ?? null,
@@ -1431,6 +1678,33 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
  * Uses configured provider architecture and handles failures safely.
  */
 async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+  const reusableEntry = findReusableImageEntryForPrompt(generationData?.prompt ?? "");
+  if (reusableEntry) {
+    console.info(`${MODULE_ID} | Reusing cached image from dump library`, {
+      entryId: reusableEntry.id,
+      prompt: reusableEntry.promptExact,
+      imagePath: reusableEntry.imagePath
+    });
+    ui.notifications.info("SceneForge AI: Reused a previously generated map for this exact prompt.");
+    const imageGenerationMetadata = {
+      provider: "cache",
+      compiledPrompt: generationData.compiledImagePrompt ?? "",
+      imageStatus: "reused",
+      imagePath: reusableEntry.imagePath,
+      costEstimate: {
+        preview: "$0.00 cached",
+        final: "$0.00 cached"
+      },
+      cacheEntryId: reusableEntry.id
+    };
+    await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+      backgroundPath: reusableEntry.imagePath,
+      imageGenerationMetadata,
+      sceneNamePrefix: "SceneForge Cached"
+    });
+    return;
+  }
+
   const provider = getAiImageProvider();
   if (provider === "none") {
     logImagePipelineError("no AI provider selected", { provider });
@@ -1475,6 +1749,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     (imageResult?.provider === "openai" && imageResult?.imageStatus === "complete")
     || (imageResult?.provider === "mock" && imageResult?.imageStatus === "mock-generated")
     || (imageResult?.provider === "subscription" && imageResult?.imageStatus === "complete")
+    || (imageResult?.provider === "cache" && imageResult?.imageStatus === "reused")
   ) && Boolean(imageResult?.imagePath);
 
   if (!validImageForScene) {
@@ -2483,7 +2758,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
 
   // AI image mode should not add procedural wall overlays that may conflict
   // with prompt fidelity or perspective in generated artwork.
-  const walls = isAiPlannerMode
+  const walls = (!ENABLE_SCENE_WALLS_AND_LIGHTS || isAiPlannerMode)
     ? []
     : buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
   const activePackIds = Array.isArray(generationData.enabledAssetPacks)
@@ -2494,7 +2769,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
     validatedTiles = await applyTileFallbackModeToTileLayers(tileLayers);
   }
-  const lights = isAiPlannerMode
+  const lights = (!ENABLE_SCENE_WALLS_AND_LIGHTS || isAiPlannerMode)
     ? []
     : buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
@@ -2591,9 +2866,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await safeEmbeddedCreate(scene, "Note", notesToCreate, "generateSceneLayout.Note.createEmbeddedDocuments");
   }
 
-  const generationLayers = ENABLE_ASSET_SPAWNING
-    ? ["walls", "floor-assets", "props", "lighting", "notes"]
-    : ["walls", "lighting", "notes"];
+  const generationLayers = [
+    ...(ENABLE_SCENE_WALLS_AND_LIGHTS ? ["walls"] : []),
+    ...(ENABLE_ASSET_SPAWNING ? ["floor-assets", "props"] : []),
+    ...(ENABLE_SCENE_WALLS_AND_LIGHTS ? ["lighting"] : []),
+    "notes"
+  ];
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
     generationMode: generationData.generationMode ?? "ai-planner",
@@ -3649,6 +3927,7 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
     const count = room.count ? ` x${room.count}` : "";
     return `${toTitle(room.type)}${count}`;
   }).join(", ");
+  const categoryReferenceSummary = getCategoryReferenceSummary(plan);
 
   const terrainType = (() => {
     if (themeText.includes("coastal") || themeText.includes("beach") || themeText.includes("ocean") || themeText.includes("shore")) {
@@ -3752,6 +4031,7 @@ function compileInkarnatePrompt(plan, layoutGraph = null) {
     "NO PERSPECTIVE CAMERA.",
     "NO CINEMATIC ANGLES.",
     `Primary user request (must follow closely): ${plan.sourcePrompt || `${plan.biome} ${plan.theme}`}.`,
+    `SceneForge category reference dump guidance: ${categoryReferenceSummary}`,
     `Biome and setting: ${plan.biome}, ${plan.theme}, ${plan.mapSize} scale (${plan.estimatedGrid}), ${plan.lightingMood} mood.`,
     `Terrain direction: ${terrainType}.`,
     `Vegetation density: ${vegetationDensity}.`,
