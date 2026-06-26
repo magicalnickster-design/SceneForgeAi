@@ -777,7 +777,11 @@ async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMe
   if (!promptExact || !imagePath || !scene) return null;
 
   if (!canUseGlobalImageDumpLibrary()) {
-    throw new Error("Global image library is required for image persistence.");
+    logImagePipelineError("global image upsert skipped (global library unavailable)", {
+      promptExact,
+      sceneId: scene?.id ?? null
+    });
+    return null;
   }
 
   const response = await callGlobalImageDumpApi("/api/maps/library/upsert", {
@@ -794,7 +798,12 @@ async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMe
   });
   const globalEntryId = response.payload?.entry?.id ?? response.payload?.id ?? null;
   if (!response.ok || !globalEntryId) {
-    throw new Error(`Global image upsert failed (${response.status || "network"}).`);
+    logImagePipelineError("global image upsert failed", {
+      promptExact,
+      sceneId: scene?.id ?? null,
+      status: response.status || "network"
+    });
+    return null;
   }
   await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, globalEntryId);
   return { id: globalEntryId, promptExact, imagePath };
@@ -803,7 +812,8 @@ async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMe
 async function markImageDumpEntryUsed(entryId, scene) {
   if (!entryId) return;
   if (!canUseGlobalImageDumpLibrary()) {
-    throw new Error("Global image library is required for usage tracking.");
+    logImagePipelineError("global usage mark skipped (global library unavailable)", { entryId });
+    return;
   }
   const response = await callGlobalImageDumpApi("/api/maps/library/mark-used", {
     method: "POST",
@@ -813,7 +823,11 @@ async function markImageDumpEntryUsed(entryId, scene) {
     }
   });
   if (!response.ok) {
-    throw new Error(`Global usage update failed (${response.status || "network"}).`);
+    logImagePipelineError("global usage update failed", {
+      entryId,
+      status: response.status || "network"
+    });
+    return;
   }
   if (scene) {
     await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entryId);
@@ -1702,15 +1716,12 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
         await markImageDumpEntryUsed(resolvedGenerationData.imageGeneration.cacheEntryId, scene);
       } else if (resolvedGenerationData.imageGeneration?.provider !== "none") {
-        const recordedEntry = await recordGeneratedImageDumpEntry({
+        await recordGeneratedImageDumpEntry({
           generationData: resolvedGenerationData,
           imageGenerationMetadata: resolvedGenerationData.imageGeneration,
           imagePath: persistedBackgroundPath,
           scene
         });
-        if (!recordedEntry?.id) {
-          throw new Error("Generated image could not be stored in global library.");
-        }
       }
     }
 
