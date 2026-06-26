@@ -15,6 +15,7 @@ const GRID_SIZE_PX = 100;
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const DEBUG = false;
+const TILE_FALLBACK_MODE = "skip-missing";
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -29,6 +30,7 @@ function debugLog(...args) {
 const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
 const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
+const ASSET_PATH_AVAILABILITY_CACHE = new Map();
 
 /**
  * Scene sizes are expressed in grid cells.
@@ -533,7 +535,7 @@ function buildGenerationConfigFromForm(form) {
     effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.10.2"
+    moduleVersion: "0.10.3"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1067,7 +1069,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.10.2",
+    version: generationData.moduleVersion ?? "0.10.3",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -1174,7 +1176,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.2"
+    moduleVersion: "0.10.3"
   };
 
   return {
@@ -1360,6 +1362,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
   const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
+  const validatedTileLayers = await applyTileFallbackModeToTileLayers(tileLayers);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -1372,12 +1375,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await scene.createEmbeddedDocuments("Wall", walls);
   }
 
-  if (tileLayers.floorTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", tileLayers.floorTiles);
+  if (validatedTileLayers.floorTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.floorTiles);
   }
 
-  if (tileLayers.propTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", tileLayers.propTiles);
+  if (validatedTileLayers.propTiles.length > 0) {
+    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.propTiles);
   }
 
   if (lights.length > 0) {
@@ -1469,7 +1472,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.2",
+    moduleVersion: "0.10.3",
     lastGeneratedAt: Date.now()
   });
 }
@@ -2056,6 +2059,73 @@ function rectOverlapsWalls(rect, walls, wallPadding = 0) {
   }
 
   return false;
+}
+
+/**
+ * Built-in fallback mode for missing placeholder assets.
+ * Currently we skip missing-image tiles so scenes stay clean.
+ */
+async function applyTileFallbackModeToTileLayers(tileLayers) {
+  if (TILE_FALLBACK_MODE !== "skip-missing") {
+    return tileLayers;
+  }
+
+  return {
+    floorTiles: await filterTilesWithAvailableAssets(tileLayers.floorTiles),
+    propTiles: await filterTilesWithAvailableAssets(tileLayers.propTiles)
+  };
+}
+
+/**
+ * Keep only tiles whose texture source can be fetched by the client.
+ * Missing paths are skipped to avoid Foundry warning triangle icons.
+ */
+async function filterTilesWithAvailableAssets(tiles) {
+  const kept = [];
+  for (const tile of tiles) {
+    const src = tile?.texture?.src;
+    const exists = await isAssetPathAvailable(src);
+    if (!exists) {
+      debugLog("Skipping tile with missing asset path", src);
+      continue;
+    }
+    kept.push(tile);
+  }
+  return kept;
+}
+
+/**
+ * Resolve and cache asset path availability.
+ */
+async function isAssetPathAvailable(src) {
+  if (!src || typeof src !== "string") return false;
+  if (src.startsWith("data:")) return true;
+  if (ASSET_PATH_AVAILABILITY_CACHE.has(src)) {
+    return ASSET_PATH_AVAILABILITY_CACHE.get(src);
+  }
+
+  const exists = await probeAssetPath(src);
+  ASSET_PATH_AVAILABILITY_CACHE.set(src, exists);
+  return exists;
+}
+
+/**
+ * Probe a path using lightweight fetch checks.
+ */
+async function probeAssetPath(src) {
+  try {
+    const headResponse = await fetch(src, { method: "HEAD", cache: "no-store" });
+    if (headResponse.ok) return true;
+  } catch (_error) {
+    // Ignore and fallback to GET probe below.
+  }
+
+  try {
+    const getResponse = await fetch(src, { method: "GET", cache: "no-store" });
+    return getResponse.ok;
+  } catch (_error) {
+    return false;
+  }
 }
 
 /**
