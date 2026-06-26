@@ -235,6 +235,10 @@ const SETTING_OPENAI_API_KEY = "openAiApiKey";
 const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
+const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
+const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
+const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
+const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
 
 /**
  * Base registry ships with the core module.
@@ -351,17 +355,58 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
-    hint: "Select provider architecture target. Mock does not call external APIs.",
+    hint: "Select provider target. Subscription backend is recommended for Patreon-based access.",
     scope: "world",
     config: true,
     type: String,
     choices: {
       none: "None",
       mock: "Mock Provider",
-      openai: "OpenAI placeholder",
+      subscription: "Subscription Backend (Patreon)",
+      openai: "OpenAI (Legacy direct key)",
       stability: "Stability placeholder"
     },
-    default: "none"
+    default: "subscription"
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, {
+    name: "Subscription Backend URL",
+    hint: "Your hosted API base URL (example: https://api.sceneforge.ai).",
+    scope: "world",
+    config: true,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_PATREON_CONNECT_URL, {
+    name: "Patreon Connect URL",
+    hint: "URL users open to link Patreon for active subscription access.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_PATREON_MANAGE_URL, {
+    name: "Patreon Manage URL",
+    hint: "URL users open to manage subscription status.",
+    scope: "world",
+    config: true,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN, {
+    name: "Subscription Session Token",
+    hint: "Per-user token issued by your backend after Patreon linking.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+    restricted: false
   });
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_API_KEY, {
@@ -464,6 +509,22 @@ function getAiImageProvider() {
 
 function getOpenAiApiKey() {
   return String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim();
+}
+
+function getSubscriptionBackendUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
+}
+
+function getPatreonConnectUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_PATREON_CONNECT_URL) ?? "").trim();
+}
+
+function getPatreonManageUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
+}
+
+function getSubscriptionAuthToken() {
+  return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
 }
 
 function getOpenAiMonthlyLimit() {
@@ -848,7 +909,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.16.1"
+    moduleVersion: "0.16.2"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1233,7 +1294,10 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   const compiledPrompt = generationData.compiledImagePrompt ?? "";
   const imageResult = await generateAiMapImage(compiledPrompt, {
     mode: "preview",
-    seed: generationData.seed
+    seed: generationData.seed,
+    plan: generationData.aiPlan ?? null,
+    layoutGraph: generationData.layoutGraph ?? null,
+    sourcePrompt: generationData.prompt ?? ""
   });
 
   if (imageResult?.imageStatus === "failed") {
@@ -1308,6 +1372,10 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
     };
   }
 
+  if (provider === "subscription") {
+    return generateSubscriptionMapImage(compiledPrompt, options);
+  }
+
   if (provider === "openai") {
     debugLog("OpenAI generation path called");
     return generateOpenAiMapImage(compiledPrompt, options);
@@ -1323,6 +1391,107 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
       final: "$0.08 placeholder"
     }
   };
+}
+
+async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
+  const provider = "subscription";
+  const costEstimate = { preview: "included with subscription", final: "included with subscription" };
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  const token = getSubscriptionAuthToken();
+
+  if (!backendBaseUrl) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "Subscription backend URL is not configured."
+    };
+  }
+
+  if (!token) {
+    const connectUrl = getPatreonConnectUrl();
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: connectUrl
+        ? `Subscription token missing. Link Patreon first: ${connectUrl}`
+        : "Subscription token missing. Link Patreon first."
+    };
+  }
+
+  const endpoint = `${backendBaseUrl}/api/maps/generate`;
+  const requestPayload = {
+    compiledPrompt,
+    seed: options.seed ?? null,
+    plan: options.plan ?? null,
+    layoutGraph: options.layoutGraph ?? null,
+    sourcePrompt: options.sourcePrompt ?? ""
+  };
+  debugLog("Subscription generation request", { endpoint, requestPayload });
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(requestPayload)
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const backendMessage = String(payload?.error ?? payload?.message ?? "");
+      if (response.status === 401 || response.status === 403) {
+        const manageUrl = getPatreonManageUrl();
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: manageUrl
+            ? `Subscription access denied. Verify Patreon status: ${manageUrl}`
+            : "Subscription access denied. Verify Patreon status."
+        };
+      }
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: backendMessage || `Subscription backend request failed (${response.status}).`
+      };
+    }
+
+    const imagePath = payload?.imagePath ?? payload?.image_url ?? payload?.url ?? null;
+    if (!imagePath) {
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: "Subscription backend returned no map image."
+      };
+    }
+
+    return {
+      provider,
+      imageStatus: "complete",
+      imagePath: String(imagePath),
+      costEstimate
+    };
+  } catch (error) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `Subscription backend request failed: ${error?.message ?? "unknown error"}`
+    };
+  }
 }
 
 /**
@@ -1777,7 +1946,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.16.1",
+    version: generationData.moduleVersion ?? "0.16.2",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-planner",
@@ -1920,7 +2089,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.16.1"
+    moduleVersion: "0.16.2"
   };
 
   return {
@@ -2236,7 +2405,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers,
     seed,
-    moduleVersion: "0.16.1",
+    moduleVersion: "0.16.2",
     lastGeneratedAt: Date.now()
   });
 
