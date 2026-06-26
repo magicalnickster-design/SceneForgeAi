@@ -27,6 +27,11 @@ function debugLog(...args) {
   console.log(`${MODULE_ID} |`, ...args);
 }
 
+function debugPayload(label, payload) {
+  if (!DEBUG) return;
+  console.log(`${MODULE_ID} | ${label} payload:`, payload);
+}
+
 // Defensive constant fallbacks to avoid runtime failures across minor API differences.
 const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
@@ -383,6 +388,68 @@ function getCurrentUsageMonthKey() {
   return `${now.getUTCFullYear()}-${month}`;
 }
 
+/**
+ * Sanitize document payloads using Foundry's document class cleaner when available.
+ * This helps strip unknown fields before creation in newer core versions.
+ */
+function sanitizeDocumentPayload(documentName, payload) {
+  const cls = getDocumentClass(documentName);
+  if (!cls || typeof cls.cleanData !== "function") {
+    return payload;
+  }
+
+  const sanitizeOne = (entry) => {
+    const clone = foundry.utils.deepClone(entry);
+    cls.cleanData(clone, { partial: false });
+    return clone;
+  };
+
+  return Array.isArray(payload) ? payload.map(sanitizeOne) : sanitizeOne(payload);
+}
+
+/**
+ * Safe wrappers around document creation to avoid runtime crashes and expose
+ * exact failing payloads in DEBUG mode.
+ */
+async function safeSceneCreate(payload, contextLabel = "Scene.create") {
+  try {
+    debugPayload(contextLabel, payload);
+    const sanitized = sanitizeDocumentPayload("Scene", payload);
+    return await Scene.create(sanitized);
+  } catch (error) {
+    console.error(`${MODULE_ID} | ${contextLabel} failed`, error);
+    debugPayload(contextLabel, payload);
+    ui.notifications.error("SceneForge AI: Scene creation failed due to invalid document data.");
+    return null;
+  }
+}
+
+async function safeJournalEntryCreate(payload, contextLabel = "JournalEntry.create") {
+  try {
+    debugPayload(contextLabel, payload);
+    const sanitized = sanitizeDocumentPayload("JournalEntry", payload);
+    return await JournalEntry.create(sanitized);
+  } catch (error) {
+    console.error(`${MODULE_ID} | ${contextLabel} failed`, error);
+    debugPayload(contextLabel, payload);
+    ui.notifications.error("SceneForge AI: Journal creation failed due to invalid document data.");
+    return null;
+  }
+}
+
+async function safeEmbeddedCreate(scene, documentName, payloadArray, contextLabel) {
+  try {
+    debugPayload(contextLabel, payloadArray);
+    const sanitized = sanitizeDocumentPayload(documentName, payloadArray);
+    return await scene.createEmbeddedDocuments(documentName, sanitized);
+  } catch (error) {
+    console.error(`${MODULE_ID} | ${contextLabel} failed`, error);
+    debugPayload(contextLabel, payloadArray);
+    ui.notifications.error(`SceneForge AI: ${documentName} creation failed due to invalid document data.`);
+    return [];
+  }
+}
+
 async function getOpenAiUsageState() {
   const raw = game.settings.get(MODULE_ID, SETTING_OPENAI_USAGE_TRACKING) ?? {};
   const currentMonth = getCurrentUsageMonthKey();
@@ -728,7 +795,7 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.14.0"
+    moduleVersion: "0.14.1"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -1016,7 +1083,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       ? { ...generationData, imageGeneration: imageGenerationMetadata }
       : generationData;
 
-    const scene = await Scene.create({
+    const scenePayload = {
       name: sceneName,
       width: widthPx,
       height: heightPx,
@@ -1034,7 +1101,8 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
           [FLAG_GENERATION_KEY]: resolvedGenerationData
         }
       }
-    });
+    };
+    const scene = await safeSceneCreate(scenePayload, "createSceneFromGenerationData.Scene.create");
 
     if (!scene) throw new Error("Scene creation returned no scene document.");
 
@@ -1577,7 +1645,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.14.0",
+    version: generationData.moduleVersion ?? "0.14.1",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "procedural",
@@ -1720,7 +1788,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.0"
+    moduleVersion: "0.14.1"
   };
 
   return {
@@ -1740,7 +1808,7 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
   const heightPx = gridCells * GRID_SIZE_PX;
   const sceneName = `SceneForge Preset - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
-  const scene = await Scene.create({
+  const scenePayload = {
     name: sceneName,
     width: widthPx,
     height: heightPx,
@@ -1762,7 +1830,8 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
         }
       }
     }
-  });
+  };
+  const scene = await safeSceneCreate(scenePayload, "importPresetAsNewScene.Scene.create");
 
   if (!scene) {
     throw new Error("Failed to create scene during preset import.");
@@ -1786,7 +1855,7 @@ async function createMissingPackWarningJournalNote(scene, missingPacks) {
 <p>SceneForge imported anyway and used base/fallback assets where premium assets were missing.</p>
   `.trim();
 
-  const journal = await JournalEntry.create({
+  const journalPayload = {
     name: `SceneForge Warning - ${scene.name}`,
     pages: [
       {
@@ -1805,12 +1874,13 @@ async function createMissingPackWarningJournalNote(scene, missingPacks) {
         warningType: "missing-packs"
       }
     }
-  });
+  };
+  const journal = await safeJournalEntryCreate(journalPayload, "createMissingPackWarningJournalNote.JournalEntry.create");
 
   const firstPage = journal?.pages?.contents?.[0];
   if (!firstPage) return;
 
-  await scene.createEmbeddedDocuments("Note", [
+  await safeEmbeddedCreate(scene, "Note", [
     {
       x: Math.floor(scene.width * 0.2),
       y: Math.floor(scene.height * 0.2),
@@ -1826,7 +1896,7 @@ async function createMissingPackWarningJournalNote(scene, missingPacks) {
         }
       }
     }
-  ]);
+  ], "createMissingPackWarningJournalNote.Note.createEmbeddedDocuments");
 }
 
 /**
@@ -1906,7 +1976,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     ? generationData.enabledAssetPacks
     : getEnabledAssetPackIds();
   const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
-  const validatedTileLayers = await applyTileFallbackModeToTileLayers(tileLayers);
+  const mergedTiles = [...tileLayers.floorTiles, ...tileLayers.propTiles];
+  const validatedTiles = await applyTileFallbackModeToTiles(mergedTiles);
   const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
 
   // Generation layers order (premium-style pipeline):
@@ -1916,19 +1987,15 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   // 4) lighting
   // 5) notes
   if (walls.length > 0) {
-    await scene.createEmbeddedDocuments("Wall", walls);
+    await safeEmbeddedCreate(scene, "Wall", walls, "generateSceneLayout.Wall.createEmbeddedDocuments");
   }
 
-  if (validatedTileLayers.floorTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.floorTiles);
-  }
-
-  if (validatedTileLayers.propTiles.length > 0) {
-    await scene.createEmbeddedDocuments("Tile", validatedTileLayers.propTiles);
+  if (validatedTiles.length > 0) {
+    await safeEmbeddedCreate(scene, "Tile", validatedTiles, "generateSceneLayout.Tile.createEmbeddedDocuments");
   }
 
   if (lights.length > 0) {
-    await scene.createEmbeddedDocuments("AmbientLight", lights);
+    await safeEmbeddedCreate(scene, "AmbientLight", lights, "generateSceneLayout.AmbientLight.createEmbeddedDocuments");
   }
 
   const summaryText = buildPromptSummary(
@@ -1941,7 +2008,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     isRegeneration,
     useDetectedSettings
   );
-  const journal = await JournalEntry.create({
+  const journalPayload = {
     name: `SceneForge Notes - ${scene.name}`,
     pages: [
       {
@@ -1960,7 +2027,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
         seed
       }
     }
-  });
+  };
+  const journal = await safeJournalEntryCreate(journalPayload, "generateSceneLayout.JournalEntry.create");
 
   const firstPage = journal?.pages?.contents?.[0];
   if (journal && firstPage) {
@@ -2002,7 +2070,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
       });
     }
 
-    await scene.createEmbeddedDocuments("Note", notesToCreate);
+    await safeEmbeddedCreate(scene, "Note", notesToCreate, "generateSceneLayout.Note.createEmbeddedDocuments");
   }
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
@@ -2030,7 +2098,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.0",
+    moduleVersion: "0.14.1",
     lastGeneratedAt: Date.now()
   });
 
@@ -2562,7 +2630,6 @@ function buildTileDataFromAsset(asset, x, y, rng, seed) {
     width: asset.width,
     height: asset.height,
     rotation: rotationByPlacement,
-    sort: asset.layer === "floor" ? 0 : 10,
     texture: {
       src: asset.src,
       scaleX: 1,
@@ -2627,15 +2694,12 @@ function rectOverlapsWalls(rect, walls, wallPadding = 0) {
  * Built-in fallback mode for missing placeholder assets.
  * Currently we skip missing-image tiles so scenes stay clean.
  */
-async function applyTileFallbackModeToTileLayers(tileLayers) {
+async function applyTileFallbackModeToTiles(tiles) {
   if (TILE_FALLBACK_MODE !== "skip-missing") {
-    return tileLayers;
+    return tiles;
   }
 
-  return {
-    floorTiles: await filterTilesWithAvailableAssets(tileLayers.floorTiles),
-    propTiles: await filterTilesWithAvailableAssets(tileLayers.propTiles)
-  };
+  return filterTilesWithAvailableAssets(tiles);
 }
 
 /**
@@ -2648,7 +2712,7 @@ async function filterTilesWithAvailableAssets(tiles) {
     const src = tile?.texture?.src;
     const exists = await isAssetPathAvailable(src);
     if (!exists) {
-      debugLog("Skipping tile with missing asset path", src);
+      debugLog("Skipping missing asset:", src);
       continue;
     }
     kept.push(tile);
