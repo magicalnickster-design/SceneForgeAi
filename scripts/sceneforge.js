@@ -1465,6 +1465,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
 async function generateAiMapImage(compiledPrompt, options = {}) {
   const configuredProvider = getAiImageProvider();
   const provider = configuredProvider;
+  console.info(`${MODULE_ID} | AI image provider selected: ${provider}`);
 
   if (provider === "none") {
     return {
@@ -1544,6 +1545,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   }
 
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
+  console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
   const requestPayload = {
     compiledPrompt,
     seed: options.seed ?? null,
@@ -1666,6 +1668,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
 
   try {
     const endpoint = "https://api.openai.com/v1/images/generations";
+    console.info(`${MODULE_ID} | OpenAI endpoint: ${endpoint} (model: gpt-image-1)`);
     const requestPayload = {
       model: "gpt-image-1",
       prompt: compiledPrompt,
