@@ -16,3 +16,16 @@
 .sceneforge-form input[type="text"] {
   width: 100%;
 }
+
+.sceneforge-autodetect-btn {
+  margin-top: 0.5rem;
+}
+
+.sceneforge-detected-results {
+  border-top: 1px solid var(--color-border-light-tertiary);
+  padding-top: 0.75rem;
+}
+
+.sceneforge-detected-content ul {
+  margin: 0.35rem 0 0 1rem;
+}

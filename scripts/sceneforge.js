@@ -35,6 +35,29 @@ const THEME_LABELS = {
   dungeon: "Dungeon"
 };
 
+const LIGHTING_MOOD_LABELS = {
+  bright: "Bright",
+  dim: "Dim",
+  dark: "Dark",
+  night: "Night",
+  magical: "Magical"
+};
+
+const FEATURE_KEYS = [
+  "bossRoom",
+  "sideRooms",
+  "storageRoom",
+  "altar",
+  "pillars",
+  "hiddenRoom",
+  "treasure",
+  "water",
+  "traps",
+  "campfire",
+  "bar",
+  "cells"
+];
+
 Hooks.once("init", () => {
   console.log(`${MODULE_ID} | Initializing SceneForge AI module`);
 });
@@ -117,28 +140,67 @@ async function openGeneratorDialog() {
         label: "Cancel"
       }
     },
-    default: "generate"
+    default: "generate",
+    render: (dialogHtml) => {
+      wireAutoDetectUi(dialogHtml);
+    }
   });
 
   dialog.render(true);
 }
 
 /**
+ * Wire click behavior for "Auto Detect From Prompt".
+ * The detected payload is cached in the form's jQuery data so Generate can reuse it.
+ */
+function wireAutoDetectUi(dialogHtml) {
+  const form = dialogHtml.find(".sceneforge-form");
+  const autoDetectButton = dialogHtml.find(".sceneforge-autodetect-btn");
+
+  autoDetectButton.on("click", () => {
+    const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
+    if (!prompt) {
+      ui.notifications.warn("SceneForge AI: Enter a prompt before auto-detecting.");
+      return;
+    }
+
+    const detected = parsePromptForSceneSettings(prompt);
+
+    // Apply suggested options into dropdowns so the user can accept or tweak.
+    form.find('[name="theme"]').val(detected.theme);
+    form.find('[name="sceneSize"]').val(detected.suggestedSize);
+
+    // Save detected payload for Generate.
+    form.data("sceneforgeDetected", detected);
+
+    renderDetectedResults(dialogHtml, detected);
+  });
+}
+
+/**
  * Handle first-time generation from dialog values.
  */
 async function handleGenerate(dialogHtml) {
-  const prompt = String(dialogHtml.find('[name="prompt"]').val() ?? "").trim();
-  const sceneSizeKey = String(dialogHtml.find('[name="sceneSize"]').val() ?? "medium");
-  const theme = String(dialogHtml.find('[name="theme"]').val() ?? "dungeon");
+  const form = dialogHtml.find(".sceneforge-form");
+  const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
+  let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
+  let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
 
   // If user leaves seed blank, we create one now and persist it in scene flags.
-  const seedInput = String(dialogHtml.find('[name="seed"]').val() ?? "").trim();
+  const seedInput = String(form.find('[name="seed"]').val() ?? "").trim();
   const seed = seedInput || randomSeedString();
 
   if (!prompt) {
     ui.notifications.warn("SceneForge AI: Please enter a prompt before generating.");
     return;
   }
+
+  // Parse from current prompt during Generate so data always matches latest text.
+  const detected = parsePromptForSceneSettings(prompt);
+
+  // Keep selected dropdown values authoritative (user can override suggestions).
+  theme = theme || detected.theme;
+  sceneSizeKey = sceneSizeKey || detected.suggestedSize;
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
@@ -148,8 +210,10 @@ async function handleGenerate(dialogHtml) {
     prompt,
     sceneSizeKey,
     theme,
+    lightingMood: detected.lightingMood,
+    detected,
     seed,
-    moduleVersion: "0.2.0"
+    moduleVersion: "0.3.0"
   };
 
   const sceneName = `SceneForge - ${formatThemeLabel(theme)} - ${seed}`;
@@ -192,6 +256,25 @@ async function handleGenerate(dialogHtml) {
 }
 
 /**
+ * Render detected values in the dialog so users can review before generating.
+ */
+function renderDetectedResults(dialogHtml, detected) {
+  const content = dialogHtml.find(".sceneforge-detected-content");
+  const enabledFeatures = FEATURE_KEYS.filter((key) => detected.features[key]);
+  const featureListHtml = enabledFeatures.length > 0
+    ? enabledFeatures.map((key) => `<li>${foundry.utils.escapeHTML(formatFeatureLabel(key, detected.features))}</li>`).join("")
+    : "<li>No specific feature keywords detected.</li>";
+
+  content.html(`
+    <p><strong>Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(detected.theme))}</p>
+    <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[detected.lightingMood] ?? "Dim")}</p>
+    <p><strong>Suggested Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(detected.suggestedSize))}</p>
+    <p><strong>Detected Features:</strong></p>
+    <ul>${featureListHtml}</ul>
+  `);
+}
+
+/**
  * Regenerate a scene from previously saved scene flags.
  */
 async function regenerateSceneFromFlags(scene) {
@@ -225,7 +308,9 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const prompt = String(generationData.prompt ?? "").trim();
   const sceneSizeKey = String(generationData.sceneSizeKey ?? "medium");
   const theme = String(generationData.theme ?? "dungeon");
+  const lightingMood = String(generationData.lightingMood ?? "dim");
   const seed = String(generationData.seed ?? randomSeedString());
+  const detected = generationData.detected ?? parsePromptForSceneSettings(prompt);
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
   const widthPx = gridCells * GRID_SIZE_PX;
@@ -248,8 +333,8 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   // Same seed + same options => same pseudo-random sequence => same layout.
   const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
 
-  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed);
-  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed);
+  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected);
+  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, detected);
 
   if (walls.length > 0) {
     await scene.createEmbeddedDocuments("Wall", walls);
@@ -259,7 +344,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     await scene.createEmbeddedDocuments("AmbientLight", lights);
   }
 
-  const summaryText = buildPromptSummary(prompt, sceneSizeKey, theme, seed, isRegeneration);
+  const summaryText = buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration);
   const journal = await JournalEntry.create({
     name: `SceneForge Notes - ${scene.name}`,
     pages: [
@@ -283,7 +368,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
 
   const firstPage = journal?.pages?.contents?.[0];
   if (journal && firstPage) {
-    await scene.createEmbeddedDocuments("Note", [
+    const notesToCreate = [
       {
         x: Math.floor(widthPx * 0.5),
         y: Math.floor(heightPx * 0.5),
@@ -299,15 +384,39 @@ async function generateSceneLayout(scene, generationData, options = {}) {
           }
         }
       }
-    ]);
+    ];
+
+    // Feature influence: add a treasure note marker when treasure is requested.
+    if (detected.features.treasure) {
+      notesToCreate.push({
+        x: Math.floor(widthPx * 0.8),
+        y: Math.floor(heightPx * 0.25),
+        entryId: journal.id,
+        pageId: firstPage.id,
+        iconSize: 36,
+        text: "Treasure Location",
+        flags: {
+          [MODULE_ID]: {
+            [FLAG_GENERATED_KEY]: true,
+            kind: "note",
+            noteType: "treasure",
+            seed
+          }
+        }
+      });
+    }
+
+    await scene.createEmbeddedDocuments("Note", notesToCreate);
   }
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
     prompt,
     sceneSizeKey,
     theme,
+    lightingMood,
+    detected,
     seed,
-    moduleVersion: "0.2.0",
+    moduleVersion: "0.3.0",
     lastGeneratedAt: Date.now()
   });
 }
@@ -353,8 +462,9 @@ async function clearGeneratedContent(scene) {
  * Build themed walls with deterministic variation.
  * Each theme has multiple variant patterns selected by seeded RNG.
  */
-function buildThemeWalls(theme, widthPx, heightPx, rng, seed) {
+function buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected) {
   const walls = [];
+  const features = detected?.features ?? {};
 
   const wallDefaults = {
     move: CONST.WALL_SENSE_TYPES.NORMAL,
@@ -400,6 +510,16 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed) {
     pushWall(x - size, y + size, x - size, y - size);
   };
 
+  /**
+   * Helper: adds a rectangular room quickly.
+   */
+  const addRoomRectangle = (left, top, right, bottom) => {
+    pushWall(left, top, right, top);
+    pushWall(right, top, right, bottom);
+    pushWall(right, bottom, left, bottom);
+    pushWall(left, bottom, left, top);
+  };
+
   if (theme === "tavern") {
     // Requirement coverage: rooms, bar area, storage room, fireplace area.
     const variant = randomInt(rng, 0, 2);
@@ -409,10 +529,7 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed) {
     const bottom = heightPx - margin - randomInt(rng, 0, 100);
 
     // Main hall boundary inside the outer walls.
-    pushWall(left, top, right, top);
-    pushWall(right, top, right, bottom);
-    pushWall(right, bottom, left, bottom);
-    pushWall(left, bottom, left, top);
+    addRoomRectangle(left, top, right, bottom);
 
     // Bar area as a U-shape.
     const barY = top + (variant === 0 ? 260 : 340);
@@ -552,16 +669,55 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed) {
     pushWall(cx + 360, cy + roomOffsetY + 220, cx + 360, cy + roomOffsetY - 180);
   }
 
+  // Feature influence: add pillars in any theme if prompt asks for pillars.
+  if (features.pillars) {
+    const pillarCount = randomInt(rng, 3, 5);
+    for (let i = 0; i < pillarCount; i += 1) {
+      const px = randomInt(rng, margin + 240, widthPx - margin - 240);
+      const py = randomInt(rng, margin + 220, heightPx - margin - 220);
+      addPillarSquare(px, py, 24);
+    }
+  }
+
+  // Feature influence: extra side rooms when prompt asks for side rooms.
+  if (features.sideRooms) {
+    const sideRoomCount = Math.max(2, Number(features.sideRoomsCount ?? 2));
+    for (let i = 0; i < sideRoomCount; i += 1) {
+      const isLeft = i % 2 === 0;
+      const offsetY = -300 + i * 260;
+      const roomLeft = isLeft ? margin + 40 : widthPx - margin - 380;
+      const roomRight = roomLeft + 340;
+      const roomTop = cy + offsetY;
+      const roomBottom = roomTop + 220;
+      addRoomRectangle(roomLeft, roomTop, roomRight, roomBottom);
+      // Small corridor connector toward center.
+      const connectX1 = isLeft ? roomRight : roomLeft;
+      const connectX2 = isLeft ? cx - 180 : cx + 180;
+      const connectY = roomTop + 110;
+      pushWall(connectX1, connectY, connectX2, connectY);
+    }
+  }
+
+  // Feature influence: hidden room layout (small off-center chamber).
+  if (features.hiddenRoom) {
+    const hiddenLeft = widthPx - margin - 360;
+    const hiddenTop = margin + 120;
+    addRoomRectangle(hiddenLeft, hiddenTop, hiddenLeft + 260, hiddenTop + 220);
+    // "False wall" segment nearby to suggest a secret access.
+    pushWall(hiddenLeft - 140, hiddenTop + 110, hiddenLeft - 30, hiddenTop + 110);
+  }
+
   return walls;
 }
 
 /**
  * Build themed ambient lights with deterministic variation.
  */
-function buildThemeLights(theme, widthPx, heightPx, rng, seed) {
+function buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, detected) {
   const lights = [];
   const cx = Math.floor(widthPx / 2);
   const cy = Math.floor(heightPx / 2);
+  const features = detected?.features ?? {};
 
   const baseFlags = {
     [MODULE_ID]: {
@@ -624,6 +780,19 @@ function buildThemeLights(theme, widthPx, heightPx, rng, seed) {
   };
   const lightCount = lightCountByTheme[theme] ?? 5;
 
+  // Lighting mood influence:
+  // - dark/night => lower bright & dim ranges
+  // - bright => stronger overall lighting
+  // - magical => arcane colors + pulse animation
+  const moodRanges = {
+    bright: { brightMin: 7, brightMax: 10, dimMin: 20, dimMax: 30, alpha: 0.55 },
+    dim: { brightMin: 4, brightMax: 7, dimMin: 14, dimMax: 22, alpha: 0.5 },
+    dark: { brightMin: 2, brightMax: 4, dimMin: 8, dimMax: 14, alpha: 0.42 },
+    night: { brightMin: 1, brightMax: 3, dimMin: 7, dimMax: 12, alpha: 0.38 },
+    magical: { brightMin: 5, brightMax: 8, dimMin: 18, dimMax: 28, alpha: 0.58 }
+  };
+  const moodConfig = moodRanges[lightingMood] ?? moodRanges.dim;
+
   for (let i = 0; i < lightCount; i += 1) {
     const spreadX = randomInt(rng, -700, 700);
     const spreadY = randomInt(rng, -500, 500);
@@ -633,11 +802,31 @@ function buildThemeLights(theme, widthPx, heightPx, rng, seed) {
       "forest-ruins": "#ffc46b",
       dungeon: "#f4c27a"
     };
+
+    const magicalColor = ["#66ccff", "#8a7dff", "#5af0c8"][randomInt(rng, 0, 2)];
+    const selectedColor = lightingMood === "magical" ? magicalColor : (colorByTheme[theme] ?? "#ffcc88");
+
     pushLight(cx + spreadX, cy + spreadY, {
       config: {
-        bright: randomInt(rng, 4, 8),
-        dim: randomInt(rng, 14, 24),
-        color: colorByTheme[theme] ?? "#ffcc88"
+        alpha: moodConfig.alpha,
+        bright: randomInt(rng, moodConfig.brightMin, moodConfig.brightMax),
+        dim: randomInt(rng, moodConfig.dimMin, moodConfig.dimMax),
+        color: selectedColor,
+        animation: lightingMood === "magical"
+          ? { type: "pulse", speed: 2, intensity: 4, reverse: false }
+          : { type: "torch", speed: 3, intensity: 3, reverse: false }
+      }
+    });
+  }
+
+  // Feature influence: campfire request adds one warm central light.
+  if (features.campfire) {
+    pushLight(cx + randomInt(rng, -120, 120), cy + randomInt(rng, -120, 120), {
+      config: {
+        bright: 5,
+        dim: 16,
+        color: "#ff7b3a",
+        animation: { type: "torch", speed: 4, intensity: 5, reverse: false }
       }
     });
   }
@@ -652,22 +841,148 @@ function formatThemeLabel(theme) {
 /**
  * Build beginner-friendly note text showing the exact saved generation data.
  */
-function buildPromptSummary(prompt, sceneSizeKey, theme, seed, isRegeneration) {
+function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration) {
   const sceneSizeLabel = {
     small: "Small (30x30)",
     medium: "Medium (50x50)",
     large: "Large (70x70)"
   }[sceneSizeKey] ?? "Medium (50x50)";
+  const featureSummary = FEATURE_KEYS
+    .filter((key) => detected?.features?.[key])
+    .map((key) => formatFeatureLabel(key, detected?.features ?? {}));
 
   return `
 <h2>SceneForge AI Prompt Summary</h2>
 <p><strong>Prompt:</strong> ${foundry.utils.escapeHTML(prompt)}</p>
 <p><strong>Theme:</strong> ${formatThemeLabel(theme)}</p>
 <p><strong>Scene Size:</strong> ${sceneSizeLabel}</p>
+<p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[lightingMood] ?? "Dim")}</p>
+<p><strong>Detected Features:</strong> ${foundry.utils.escapeHTML(featureSummary.join(", ") || "None")}</p>
 <p><strong>Seed:</strong> ${foundry.utils.escapeHTML(seed)}</p>
 <p><strong>Generation Mode:</strong> ${isRegeneration ? "Regenerated from scene flags" : "Initial generation"}</p>
 <p>This layout is deterministic and local-only. No external AI API calls are used.</p>
   `.trim();
+}
+
+/**
+ * Parse a natural-language prompt using local keyword rules only.
+ * No external API calls are made.
+ */
+function parsePromptForSceneSettings(prompt) {
+  const text = prompt.toLowerCase();
+  const has = (keywords) => keywords.some((k) => text.includes(k));
+  const countHits = (keywords) => keywords.reduce((sum, k) => sum + (text.includes(k) ? 1 : 0), 0);
+
+  // Theme scoring lets multiple clues compete.
+  const themeScores = {
+    tavern: countHits(["tavern", "inn", "bar", "pub", "alehouse"]),
+    cave: countHits(["cave", "cavern", "grotto", "underground", "tunnel"]),
+    "forest-ruins": countHits(["forest", "ruins", "ruined", "temple", "overgrown", "jungle"]),
+    dungeon: countHits(["dungeon", "crypt", "catacomb", "cells", "prison", "fortress"])
+  };
+
+  const sortedThemes = Object.entries(themeScores).sort((a, b) => b[1] - a[1]);
+  const bestTheme = sortedThemes[0]?.[1] > 0 ? sortedThemes[0][0] : "dungeon";
+
+  let lightingMood = "dim";
+  if (has(["magical", "arcane", "rune", "runes", "glowing sigil", "sigil"])) lightingMood = "magical";
+  else if (has(["night", "moonlit", "midnight"])) lightingMood = "night";
+  else if (has(["dark", "pitch black", "gloom"])) lightingMood = "dark";
+  else if (has(["bright", "sunlit", "well lit"])) lightingMood = "bright";
+  else if (has(["dim", "low light", "shadowy"])) lightingMood = "dim";
+
+  const sideRoomsCount = detectCountFromPrompt(text, ["side room", "side rooms"], 2);
+
+  const features = {
+    bossRoom: has(["boss room", "boss chamber", "final chamber", "throne room"]),
+    sideRooms: has(["side room", "side rooms", "wing", "wings"]),
+    sideRoomsCount,
+    storageRoom: has(["storage", "storeroom", "supply room", "pantry"]),
+    altar: has(["altar", "shrine", "sacrificial"]),
+    pillars: has(["pillar", "pillars", "columns", "column"]),
+    hiddenRoom: has(["hidden room", "secret room", "secret chamber", "hidden chamber"]),
+    treasure: has(["treasure", "loot", "hoard", "chest", "vault"]),
+    water: has(["water", "pool", "river", "stream", "flooded"]),
+    traps: has(["trap", "traps", "spike", "pitfall", "tripwire"]),
+    campfire: has(["campfire", "bonfire", "fire pit"]),
+    bar: has(["bar", "counter", "taproom"]),
+    cells: has(["cells", "cell block", "prison cell", "jail"])
+  };
+
+  const enabledFeatureCount = FEATURE_KEYS.reduce((sum, key) => sum + (features[key] ? 1 : 0), 0);
+  let suggestedSize = "medium";
+  if (enabledFeatureCount >= 5) suggestedSize = "large";
+  else if (enabledFeatureCount <= 1) suggestedSize = "small";
+
+  return {
+    theme: bestTheme,
+    lightingMood,
+    features,
+    suggestedSize,
+    featureCount: enabledFeatureCount
+  };
+}
+
+/**
+ * Convert scene size key to display text.
+ */
+function formatSceneSizeLabel(sceneSizeKey) {
+  const labels = {
+    small: "Small (30x30)",
+    medium: "Medium (50x50)",
+    large: "Large (70x70)"
+  };
+  return labels[sceneSizeKey] ?? labels.medium;
+}
+
+/**
+ * Turn feature keys into user-facing labels.
+ */
+function formatFeatureLabel(featureKey, features = {}) {
+  const labels = {
+    bossRoom: "Boss Room",
+    sideRooms: `Side Rooms${features.sideRoomsCount ? ` (${features.sideRoomsCount})` : ""}`,
+    storageRoom: "Storage Room",
+    altar: "Altar",
+    pillars: "Pillars",
+    hiddenRoom: "Hidden Room",
+    treasure: "Treasure",
+    water: "Water",
+    traps: "Traps",
+    campfire: "Campfire",
+    bar: "Bar",
+    cells: "Cells"
+  };
+  return labels[featureKey] ?? featureKey;
+}
+
+/**
+ * Detect a rough count for keyworded items, e.g. "two side rooms".
+ */
+function detectCountFromPrompt(text, phrases, fallback) {
+  const numberWords = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6
+  };
+
+  for (const phrase of phrases) {
+    const numericRegex = new RegExp(`(\\d+)\\s+${phrase.replace(" ", "\\s+")}`);
+    const numericMatch = text.match(numericRegex);
+    if (numericMatch) {
+      return Math.max(1, Number(numericMatch[1]));
+    }
+
+    for (const [word, value] of Object.entries(numberWords)) {
+      const wordRegex = new RegExp(`${word}\\s+${phrase.replace(" ", "\\s+")}`);
+      if (wordRegex.test(text)) return value;
+    }
+  }
+
+  return fallback;
 }
 
 /**
