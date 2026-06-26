@@ -12,3 +12,7 @@
   min-height: 90px;
   resize: vertical;
 }
+
+.sceneforge-form input[type="text"] {
+  width: 100%;
+}
