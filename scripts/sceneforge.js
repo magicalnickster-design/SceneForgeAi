@@ -498,7 +498,7 @@ function buildGenerationConfigFromForm(form) {
     effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.9.0"
+    moduleVersion: "0.10.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -555,6 +555,8 @@ function buildGenerationPreviewData(config) {
     .map((key) => formatFeatureLabel(key, generationData.effectiveDetected.features));
 
   const estimatedNotes = 1 + (generationData.effectiveDetected?.features?.treasure ? 1 : 0);
+  const packContribution = estimateAssetPackContribution(tiles);
+  const featureImpact = estimateFeatureImpact(generationData);
 
   return {
     finalTheme: generationData.theme,
@@ -565,11 +567,56 @@ function buildGenerationPreviewData(config) {
     enabledAssetPacks: generationData.enabledAssetPacks,
     estimated: {
       walls: walls.length,
-      lights: lights.length,
-      tiles: tiles.floorTiles.length + tiles.propTiles.length,
+      ambientLights: lights.length,
+      floorTiles: tiles.floorTiles.length,
+      propTiles: tiles.propTiles.length,
       notes: estimatedNotes
-    }
+    },
+    packContribution,
+    featureImpact
   };
+}
+
+/**
+ * Estimate how many preview tiles come from each asset pack source.
+ */
+function estimateAssetPackContribution(tiles) {
+  const contribution = {
+    base: 0,
+    "premium-tavern": 0,
+    "dark-dungeon": 0,
+    "rune-ruins": 0
+  };
+
+  const allTiles = [...tiles.floorTiles, ...tiles.propTiles];
+  for (const tile of allTiles) {
+    const packId = tile.flags?.[MODULE_ID]?.packId ?? "base";
+    if (!Object.prototype.hasOwnProperty.call(contribution, packId)) {
+      contribution[packId] = 0;
+    }
+    contribution[packId] += 1;
+  }
+
+  return contribution;
+}
+
+/**
+ * Describe likely generation effects caused by detected features and lighting.
+ * These are preview hints only and do not create any scene documents.
+ */
+function estimateFeatureImpact(generationData) {
+  const impacts = [];
+  const features = generationData.effectiveDetected?.features ?? {};
+  const lightingMood = generationData.lightingMood;
+
+  if (features.pillars) impacts.push("pillars detected: +pillar props");
+  if (features.treasure) impacts.push("treasure detected: +treasure note");
+  if (features.hiddenRoom) impacts.push("hidden room detected: +secret room layout");
+  if (lightingMood === "night" || lightingMood === "dark") {
+    impacts.push(`${lightingMood} detected: reduced light radius`);
+  }
+
+  return impacts;
 }
 
 /**
@@ -584,6 +631,10 @@ async function openGenerationPreviewDialog(config, previewData) {
     ? previewData.enabledAssetPacks.map((packId) => `<li>${foundry.utils.escapeHTML(packId)}</li>`).join("")
     : "<li>base</li>";
 
+  const featureImpactHtml = previewData.featureImpact.length > 0
+    ? previewData.featureImpact.map((line) => `<li>${foundry.utils.escapeHTML(line)}</li>`).join("")
+    : "<li>No special feature impacts detected.</li>";
+
   const content = `
 <div class="sceneforge-preview">
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
@@ -596,7 +647,27 @@ async function openGenerationPreviewDialog(config, previewData) {
   <ul>${packsHtml}</ul>
   <hr/>
   <p><strong>Estimated Objects</strong></p>
-  <p>Walls: ${previewData.estimated.walls} | Lights: ${previewData.estimated.lights} | Tiles: ${previewData.estimated.tiles} | Notes: ${previewData.estimated.notes}</p>
+  <p>Walls: ${previewData.estimated.walls} | Ambient Lights: ${previewData.estimated.ambientLights} | Tiles: ${previewData.estimated.floorTiles + previewData.estimated.propTiles} | Notes: ${previewData.estimated.notes}</p>
+  <details>
+    <summary><strong>Advanced Breakdown</strong></summary>
+    <p><strong>Estimated Counts by Category</strong></p>
+    <ul>
+      <li>walls: ${previewData.estimated.walls}</li>
+      <li>ambient lights: ${previewData.estimated.ambientLights}</li>
+      <li>floor tiles: ${previewData.estimated.floorTiles}</li>
+      <li>prop tiles: ${previewData.estimated.propTiles}</li>
+      <li>notes: ${previewData.estimated.notes}</li>
+    </ul>
+    <p><strong>Asset Pack Contribution Estimate</strong></p>
+    <ul>
+      <li>base assets: ${previewData.packContribution.base ?? 0}</li>
+      <li>premium tavern pack: ${previewData.packContribution["premium-tavern"] ?? 0}</li>
+      <li>dark dungeon pack: ${previewData.packContribution["dark-dungeon"] ?? 0}</li>
+      <li>rune ruins pack: ${previewData.packContribution["rune-ruins"] ?? 0}</li>
+    </ul>
+    <p><strong>Feature Impact</strong></p>
+    <ul>${featureImpactHtml}</ul>
+  </details>
 </div>
   `;
 
@@ -949,7 +1020,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.9.0",
+    version: generationData.moduleVersion ?? "0.10.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -1056,7 +1127,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.9.0"
+    moduleVersion: "0.10.0"
   };
 
   return {
@@ -1351,7 +1422,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.9.0",
+    moduleVersion: "0.10.0",
     lastGeneratedAt: Date.now()
   });
 }
