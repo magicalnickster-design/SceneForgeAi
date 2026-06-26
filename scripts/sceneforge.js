@@ -14,6 +14,21 @@ const MODULE_ID = "sceneforge-ai";
 const GRID_SIZE_PX = 100;
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
+const DEBUG = false;
+
+/**
+ * Lightweight debug logger so noisy logs can stay disabled by default.
+ * Set DEBUG = true while developing/troubleshooting.
+ */
+function debugLog(...args) {
+  if (!DEBUG) return;
+  console.log(`${MODULE_ID} |`, ...args);
+}
+
+// Defensive constant fallbacks to avoid runtime failures across minor API differences.
+const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
+const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
+const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
 
 /**
  * Scene sizes are expressed in grid cells.
@@ -143,7 +158,7 @@ const runeRuinsRegistry = {
 };
 
 Hooks.once("init", () => {
-  console.log(`${MODULE_ID} | Initializing SceneForge AI module`);
+  debugLog("Initializing module");
   registerAssetPackSettings();
 });
 
@@ -337,11 +352,14 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
  * The dataset key can vary by Foundry version, so we check multiple keys.
  */
 function getSceneFromDirectoryLi(li) {
+  const jq = li?.jquery ? li : $(li);
   const sceneId =
-    li?.data?.("documentId")
-    ?? li?.data?.("entryId")
+    jq?.data?.("documentId")
+    ?? jq?.data?.("entryId")
     ?? li?.[0]?.dataset?.documentId
-    ?? li?.[0]?.dataset?.entryId;
+    ?? li?.[0]?.dataset?.entryId
+    ?? li?.dataset?.documentId
+    ?? li?.dataset?.entryId;
 
   if (!sceneId) return null;
   return game.scenes.get(sceneId) ?? null;
@@ -498,7 +516,7 @@ function buildGenerationConfigFromForm(form) {
     effectiveDetected: useDetectedSettings ? detected : buildDisabledDetectedPayload(detected),
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.10.0"
+    moduleVersion: "0.10.1"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -557,6 +575,14 @@ function buildGenerationPreviewData(config) {
   const estimatedNotes = 1 + (generationData.effectiveDetected?.features?.treasure ? 1 : 0);
   const packContribution = estimateAssetPackContribution(tiles);
   const featureImpact = estimateFeatureImpact(generationData);
+  debugLog("Preview estimates", {
+    theme: generationData.theme,
+    size: generationData.sceneSizeKey,
+    walls: walls.length,
+    lights: lights.length,
+    floorTiles: tiles.floorTiles.length,
+    propTiles: tiles.propTiles.length
+  });
 
   return {
     finalTheme: generationData.theme,
@@ -956,6 +982,10 @@ async function promptImportPresetFile() {
       }
 
       const missingPacks = getMissingPresetPacks(validation.generationData);
+      debugLog("Preset import pack check", {
+        required: validation.generationData.enabledAssetPacks,
+        missing: missingPacks
+      });
       let importWithMissingPacks = false;
       if (missingPacks.length > 0) {
         const shouldImport = await promptMissingPacksWarningDialog(missingPacks);
@@ -1020,7 +1050,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.10.0",
+    version: generationData.moduleVersion ?? "0.10.1",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     prompt: generationData.prompt,
@@ -1127,7 +1157,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.0"
+    moduleVersion: "0.10.1"
   };
 
   return {
@@ -1422,7 +1452,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.10.0",
+    moduleVersion: "0.10.1",
     lastGeneratedAt: Date.now()
   });
 }
@@ -1480,11 +1510,11 @@ function buildThemeWalls(theme, widthPx, heightPx, rng, seed, detected) {
   const features = detected?.features ?? {};
 
   const wallDefaults = {
-    move: CONST.WALL_SENSE_TYPES.NORMAL,
-    sight: CONST.WALL_SENSE_TYPES.NORMAL,
-    sound: CONST.WALL_SENSE_TYPES.NORMAL,
-    door: CONST.WALL_DOOR_TYPES.NONE,
-    ds: CONST.WALL_DOOR_STATES.CLOSED
+    move: WALL_NORMAL,
+    sight: WALL_NORMAL,
+    sound: WALL_NORMAL,
+    door: WALL_DOOR_NONE,
+    ds: WALL_DOOR_CLOSED
   };
 
   const baseFlags = {

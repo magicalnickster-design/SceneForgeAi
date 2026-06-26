@@ -2,7 +2,7 @@
   "id": "sceneforge-ai",
   "title": "SceneForge AI",
   "description": "MVP module that generates a basic playable scene from a GM prompt.",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "authors": [
     {
       "name": "SceneForge AI Team"
