@@ -656,24 +656,28 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
   // If we returned from preview mode via Back/Edit, restore previous values.
   applyGeneratorFormState(form, initialState);
 
-  // Run once on initial render so the preview is immediately useful.
+  // Run once on initial render so prompt parsing cache is primed.
   refreshDetectionPreview(dialogHtml);
 
-  autoDetectButton.on("click", () => {
-    const detected = refreshDetectionPreview(dialogHtml);
-    if (!detected) {
-      ui.notifications.warn("SceneForge AI: Enter a prompt before auto-detecting.");
-    }
-  });
+  if (autoDetectButton.length > 0) {
+    autoDetectButton.on("click", () => {
+      const detected = refreshDetectionPreview(dialogHtml);
+      if (!detected) {
+        ui.notifications.warn("SceneForge AI: Enter a prompt before auto-detecting.");
+      }
+    });
+  }
 
-  // If the user toggles ON after already detecting, sync manual controls again.
-  useDetectedToggle.on("change", () => {
-    const detected = form.data("sceneforgeDetected");
-    if (!detected) return;
-    if (useDetectedToggle.is(":checked")) {
-      applyDetectedSettingsToControls(form, detected);
-    }
-  });
+  if (useDetectedToggle.length > 0) {
+    // If the user toggles ON after already detecting, sync manual controls again.
+    useDetectedToggle.on("change", () => {
+      const detected = form.data("sceneforgeDetected");
+      if (!detected) return;
+      if (useDetectedToggle.is(":checked")) {
+        applyDetectedSettingsToControls(form, detected);
+      }
+    });
+  }
 }
 
 /**
@@ -681,7 +685,6 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
  */
 function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
-  if (typeof state.generationMode === "string") form.find('[name="generationMode"]').val(state.generationMode);
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.sceneSizeKey === "string") form.find('[name="sceneSize"]').val(state.sceneSizeKey);
   if (typeof state.theme === "string") form.find('[name="theme"]').val(state.theme);
@@ -706,7 +709,9 @@ function refreshDetectionPreview(dialogHtml) {
     applyDetectedSettingsToControls(form, detected);
   }
 
-  renderDetectedResults(dialogHtml, detected);
+  if (dialogHtml.find(".sceneforge-detected-results").length > 0) {
+    renderDetectedResults(dialogHtml, detected);
+  }
   return detected;
 }
 
@@ -735,12 +740,12 @@ async function handleGenerate(dialogHtml) {
  * Build normalized generation config from generator dialog inputs.
  */
 function buildGenerationConfigFromForm(form) {
-  const generationMode = String(form.find('[name="generationMode"]').val() ?? "procedural");
+  const generationMode = "ai-planner";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
-  let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
-  let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
-  let lightingMood = String(form.find('[name="lightingMood"]').val() ?? "dim");
-  const useDetectedSettings = form.find('[name="useDetectedSettings"]').is(":checked");
+  let sceneSizeKey = "medium";
+  let theme = "dungeon";
+  let lightingMood = "dim";
+  const useDetectedSettings = true;
   const seedInput = String(form.find('[name="seed"]').val() ?? "").trim();
   const seed = seedInput || randomSeedString();
 
@@ -750,28 +755,15 @@ function buildGenerationConfigFromForm(form) {
   }
 
   const detected = parsePromptForSceneSettings(prompt);
-  if (generationMode === "procedural" && useDetectedSettings) {
-    theme = detected.theme;
-    sceneSizeKey = detected.suggestedSize;
-    lightingMood = detected.lightingMood;
-  }
+  const aiPlan = parseAiMapPlan(prompt);
+  const layoutGraph = buildLayoutGraphFromPlan(aiPlan, seed);
+  const compiledImagePrompt = compileInkarnatePrompt(aiPlan, layoutGraph);
+  let effectiveDetected = applyAiPlanFeaturesToDetected(detected, aiPlan);
 
-  let aiPlan = null;
-  let layoutGraph = null;
-  let compiledImagePrompt = null;
-  let effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
-
-  if (generationMode === "ai-planner") {
-    aiPlan = parseAiMapPlan(prompt);
-    layoutGraph = buildLayoutGraphFromPlan(aiPlan, seed);
-    compiledImagePrompt = compileInkarnatePrompt(aiPlan, layoutGraph);
-
-    // AI planner provides the final map intent; map it onto current generator knobs.
-    theme = mapAiPlanThemeToSceneTheme(aiPlan);
-    sceneSizeKey = mapAiPlanSizeToSceneSizeKey(aiPlan.mapSize);
-    lightingMood = mapAiPlanLightingToSceneLighting(aiPlan.lightingMood);
-    effectiveDetected = applyAiPlanFeaturesToDetected(effectiveDetected, aiPlan);
-  }
+  // AI planner provides the final map intent; map it onto current generator knobs.
+  theme = mapAiPlanThemeToSceneTheme(aiPlan);
+  sceneSizeKey = mapAiPlanSizeToSceneSizeKey(aiPlan.mapSize);
+  lightingMood = mapAiPlanLightingToSceneLighting(aiPlan.lightingMood);
 
   const generationData = {
     generationMode,
@@ -797,16 +789,16 @@ function buildGenerationConfigFromForm(form) {
     },
     enabledAssetPacks: getEnabledAssetPackIds(),
     seed,
-    moduleVersion: "0.14.5"
+    moduleVersion: "0.14.6"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
   const formState = {
     generationMode,
     prompt,
-    sceneSizeKey: String(form.find('[name="sceneSize"]').val() ?? "medium"),
-    theme: String(form.find('[name="theme"]').val() ?? "dungeon"),
-    lightingMood: String(form.find('[name="lightingMood"]').val() ?? "dim"),
+    sceneSizeKey,
+    theme,
+    lightingMood,
     seed,
     useDetectedSettings
   };
@@ -878,7 +870,7 @@ function buildGenerationPreviewData(config) {
   });
 
   return {
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-planner",
     finalTheme: generationData.theme,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
@@ -889,10 +881,6 @@ function buildGenerationPreviewData(config) {
     layoutGraph: generationData.layoutGraph,
     compiledImagePrompt: generationData.compiledImagePrompt,
     aiImageProvider: generationData.imageGeneration?.provider ?? "none",
-    aiImageCostEstimate: generationData.imageGeneration?.costEstimate ?? {
-      preview: "$0.00 mock",
-      final: "$0.08 placeholder"
-    },
     aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
     estimated: {
       walls: walls.length,
@@ -975,8 +963,7 @@ async function openGenerationPreviewDialog(config, previewData) {
   const compiledPromptHtml = previewData.compiledImagePrompt
     ? foundry.utils.escapeHTML(previewData.compiledImagePrompt)
     : "";
-  const aiPlannerSection = previewData.generationMode === "ai-planner"
-    ? `
+  const aiPlannerSection = `
   <hr/>
   <p><strong>AI Planner Summary</strong></p>
   <ul>${aiSummaryHtml}</ul>
@@ -987,13 +974,11 @@ async function openGenerationPreviewDialog(config, previewData) {
   <p><strong>Compiled Image Prompt Preview</strong></p>
   <pre>${compiledPromptHtml}</pre>
   <p><strong>AI Image Provider:</strong> ${foundry.utils.escapeHTML(previewData.aiImageProvider)}</p>
-  <p><strong>Cost Estimate:</strong> preview image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.preview)}, final image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.final)}</p>
-    `
-    : "";
+    `;
 
   const content = `
 <div class="sceneforge-preview">
-  <p><strong>Generation Mode:</strong> ${previewData.generationMode === "ai-planner" ? "AI Planner Mode" : "Procedural Mode"}</p>
+  <p><strong>Generation Mode:</strong> AI Planner Mode</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
@@ -1030,11 +1015,10 @@ async function openGenerationPreviewDialog(config, previewData) {
   `;
 
   const userChoice = await new Promise((resolve) => {
-    const isAiPlanner = config.generationData?.generationMode === "ai-planner";
     const buttons = {
       confirm: {
         icon: '<i class="fas fa-check"></i>',
-        label: isAiPlanner ? "Confirm Generate AI Map" : "Confirm Generate",
+        label: "Generate AI Map",
         callback: () => resolve("confirm")
       },
       back: {
@@ -1065,14 +1049,8 @@ async function openGenerationPreviewDialog(config, previewData) {
   }
   if (userChoice !== "confirm") return;
 
-  if (config.generationData?.generationMode === "ai-planner") {
-    debugLog("AI Planner Confirm clicked");
-    await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
-    return;
-  }
-
-  debugLog("Procedural generation path called");
-  await createSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
+  debugLog("AI Planner Confirm clicked");
+  await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
 }
 
 /**
@@ -1371,7 +1349,6 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
  */
 function promptPaidGenerationConfirmation(compiledPrompt, options = {}) {
   const {
-    estimatedCost = "$0.08 placeholder",
     usageCount = 0,
     usageLimit = 0,
     requireConfirmation = true
@@ -1383,7 +1360,6 @@ function promptPaidGenerationConfirmation(compiledPrompt, options = {}) {
     const dialog = new Dialog({
       title: "Confirm Paid AI Generation",
       content: `
-<p><strong>Estimated Cost:</strong> ${foundry.utils.escapeHTML(estimatedCost)}</p>
 <p><strong>Monthly Usage:</strong> ${usageCount}/${usageLimit}</p>
 <p><strong>Compiled Prompt:</strong></p>
 <pre>${foundry.utils.escapeHTML(compiledPrompt)}</pre>
@@ -1712,10 +1688,10 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.14.5",
+    version: generationData.moduleVersion ?? "0.14.6",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-planner",
     prompt: generationData.prompt,
     theme: generationData.theme,
     size: generationData.sceneSizeKey,
@@ -1786,7 +1762,7 @@ function validateImportedPreset(rawPreset) {
   }
 
   const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
-  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "procedural");
+  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "ai-planner");
   const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
   const theme = String(rawPreset.theme ?? rawPreset.generationData?.theme ?? "").trim();
   const sceneSizeKey = String(rawPreset.size ?? rawPreset.sceneSizeKey ?? rawPreset.generationData?.sceneSizeKey ?? "").trim();
@@ -1855,7 +1831,7 @@ function validateImportedPreset(rawPreset) {
       ? rawPreset.generationLayers
       : ["walls", "floor-assets", "props", "lighting", "notes"],
     seed,
-    moduleVersion: "0.14.5"
+    moduleVersion: "0.14.6"
   };
 
   return {
@@ -2147,7 +2123,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     : ["walls", "lighting", "notes"];
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-planner",
     prompt,
     sceneSizeKey,
     theme,
@@ -2171,7 +2147,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: activePackIds,
     generationLayers,
     seed,
-    moduleVersion: "0.14.5",
+    moduleVersion: "0.14.6",
     lastGeneratedAt: Date.now()
   });
 
