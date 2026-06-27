@@ -457,9 +457,11 @@ const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
 const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
 const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
 const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
+const SETTING_SUBSCRIPTION_ACCESS_CODE = "subscriptionAccessCode";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
+const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 
 /**
  * Base registry ships with the core module.
@@ -669,6 +671,16 @@ function registerAssetPackSettings() {
     restricted: false
   });
 
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE, {
+    name: "Subscription Access Code",
+    hint: "Temporary fallback access code while Patreon token support is being finalized.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+    restricted: false
+  });
+
   game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, {
     name: "Subscription Account State",
     scope: "client",
@@ -836,7 +848,11 @@ function getPatreonManageUrl() {
 }
 
 function getSubscriptionAuthToken() {
-  return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
+  const token = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
+  if (token) return token;
+  const accessCode = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE) ?? "").trim();
+  if (accessCode === EARLY_ACCESS_SUBSCRIPTION_CODE) return accessCode;
+  return "";
 }
 
 function getSubscriptionAccountState() {
