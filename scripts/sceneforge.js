@@ -1682,9 +1682,11 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
   const state = getSubscriptionAccountState();
   const remaining = Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
   const linkedAccount = formatLinkedAccountLabel(state);
-  const statusText = state.linked
-    ? `Linked as: ${linkedAccount} | Tier: ${state.tier || "unknown"} | Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} | Remaining: ${remaining}`
-    : "Patreon not linked.";
+  const linkedLine = state.linked
+    ? `Linked as: ${linkedAccount}`
+    : "Linked as: Not linked";
+  const tierLine = `Tier: ${state.linked ? (state.tier || "unknown") : "none"}`;
+  const usageLine = `Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} (Remaining: ${remaining})`;
 
   const actions = document.createElement("div");
   actions.className = "form-group sceneforge-patreon-actions";
@@ -1694,7 +1696,11 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
       <button type="button" class="sceneforge-link-patreon"><i class="fas fa-link"></i> Link Patreon</button>
       <button type="button" class="sceneforge-sync-patreon"><i class="fas fa-rotate"></i> Sync Subscription</button>
     </div>
-    <p class="notes sceneforge-patreon-status">${foundry.utils.escapeHTML(statusText)}</p>
+    <div class="notes sceneforge-patreon-status" style="margin-top:6px; line-height:1.4;">
+      <div><strong>${foundry.utils.escapeHTML(linkedLine)}</strong></div>
+      <div>${foundry.utils.escapeHTML(tierLine)}</div>
+      <div>${foundry.utils.escapeHTML(usageLine)}</div>
+    </div>
   `;
   tokenGroup.after(actions);
 
