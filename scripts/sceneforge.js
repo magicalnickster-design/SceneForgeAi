@@ -12,6 +12,7 @@
 
 const MODULE_ID = "sceneforge-ai";
 const GRID_SIZE_PX = 100;
+const DEFAULT_SCENE_BACKGROUND_COLOR = "#000000";
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
@@ -333,6 +334,13 @@ const SCENE_SIZES = {
   medium: 50,
   large: 70,
   xlarge: 90
+};
+
+const SCENE_GRID_PIXEL_SIZES = {
+  small: 120,
+  medium: 80,
+  large: 60,
+  xlarge: 40
 };
 
 const MAP_COVERAGE_METERS = {
@@ -795,6 +803,10 @@ function getOpenAiMonthlyLimit() {
 
 function getMapCoverageMeters(mapScaleKey) {
   return Number(MAP_COVERAGE_METERS[mapScaleKey] ?? MAP_COVERAGE_METERS.medium);
+}
+
+function getSceneGridPixelSize(sceneSizeKey) {
+  return Number(SCENE_GRID_PIXEL_SIZES[sceneSizeKey] ?? SCENE_GRID_PIXEL_SIZES.medium);
 }
 
 function getImageOrientationSpec(imageOrientationKey) {
@@ -1629,8 +1641,9 @@ function buildGenerationConfigFromForm(form) {
 function buildGenerationPreviewData(config) {
   const generationData = config.generationData;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
 
   const rng = createSeededRng(`${generationData.seed}|${generationData.theme}|${generationData.sceneSizeKey}|${generationData.prompt}`);
   const walls = ENABLE_SCENE_WALLS_AND_LIGHTS
@@ -1904,8 +1917,11 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
   }
 
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = Number(generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey));
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
   const sceneName = buildSceneNameFromPrompt(generationData?.prompt ?? "", {
     prefix: sceneNamePrefix,
     fallback: "Map"
@@ -1924,11 +1940,11 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       padding: 0.1,
       grid: {
         type: CONST.GRID_TYPES.SQUARE,
-        size: GRID_SIZE_PX,
-        distance: 5,
-        units: "ft"
+        size: gridPixelSize,
+        distance: metersPerGrid,
+        units: "m"
       },
-      backgroundColor: "#2b2b2b",
+      backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR,
       navigation: true,
       flags: {
         [MODULE_ID]: {
@@ -1980,18 +1996,20 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       // The old fixed 50x50 grid at 100px (5000x5000) stretched 1024px maps heavily.
       const imageDimensions = await getImagePixelDimensions(persistedBackgroundPath);
       if (imageDimensions?.width && imageDimensions?.height) {
+        const resolvedGridPixelSize = getSceneGridPixelSize(resolvedGenerationData.sceneSizeKey);
         const mapCoverageMeters = Number(resolvedGenerationData.mapCoverageMeters ?? getMapCoverageMeters(resolvedGenerationData.sceneSizeKey));
-        const gridSquaresAcross = Math.max(1, imageDimensions.width / GRID_SIZE_PX);
+        const gridSquaresAcross = Math.max(1, imageDimensions.width / resolvedGridPixelSize);
         const metersPerGrid = Math.max(0.1, mapCoverageMeters / gridSquaresAcross);
         await scene.update({
           width: imageDimensions.width,
           height: imageDimensions.height,
           grid: {
             type: CONST.GRID_TYPES.SQUARE,
-            size: GRID_SIZE_PX,
+            size: resolvedGridPixelSize,
             distance: metersPerGrid,
             units: "m"
-          }
+          },
+          backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR
         });
       }
 
@@ -3250,8 +3268,11 @@ function validateImportedPreset(rawPreset) {
 async function importPresetAsNewScene(generationData, sourceVersion = "unknown", options = {}) {
   const { missingPacks = [] } = options;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = Number(generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey));
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
   const sceneName = `SceneForge Preset - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   const scenePayload = {
@@ -3261,11 +3282,11 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
     padding: 0.1,
     grid: {
       type: CONST.GRID_TYPES.SQUARE,
-      size: GRID_SIZE_PX,
-      distance: 5,
-      units: "ft"
+      size: gridPixelSize,
+      distance: metersPerGrid,
+      units: "m"
     },
-    backgroundColor: "#2b2b2b",
+    backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR,
     navigation: true,
     flags: {
       [MODULE_ID]: {
@@ -3395,8 +3416,11 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   const effectiveDetected = null;
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
 
   // Keep scene settings aligned with saved generation options every regeneration.
   await scene.update({
@@ -3404,10 +3428,11 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     height: heightPx,
     grid: {
       type: CONST.GRID_TYPES.SQUARE,
-      size: GRID_SIZE_PX,
-      distance: 5,
-      units: "ft"
-    }
+      size: gridPixelSize,
+      distance: metersPerGrid,
+      units: "m"
+    },
+    backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR
   });
 
   await clearGeneratedContent(scene);
