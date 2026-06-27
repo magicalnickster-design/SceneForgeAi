@@ -2018,8 +2018,8 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
   } catch (error) {
     logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
-    ui.notifications.error("SceneForge AI: Global cache lookup failed. Generation blocked until service is reachable.");
-    return;
+    ui.notifications.warn("SceneForge AI: Global cache lookup failed. Proceeding with new image generation.");
+    reusableEntry = null;
   }
   if (reusableEntry) {
     console.info(`${MODULE_ID} | Reusing cached image from dump library`, {
