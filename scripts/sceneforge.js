@@ -610,7 +610,7 @@ function registerAssetPackSettings() {
     name: "AI Image Provider",
     hint: "Select image provider for map generation.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     choices: {
       "black-forest-labs": "Black Forest Labs (via Subscription Backend)",
@@ -635,7 +635,7 @@ function registerAssetPackSettings() {
     name: "Subscription Backend URL",
     hint: "Your hosted API base URL (example: https://api.sceneforge.ai).",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "https://sceneforge-backend.onrender.com",
     restricted: true
@@ -645,7 +645,7 @@ function registerAssetPackSettings() {
     name: "Patreon Connect URL",
     hint: "URL users open to link Patreon for active subscription access.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "https://sceneforge-backend.onrender.com/api/auth/patreon/connect",
     restricted: true
@@ -655,7 +655,7 @@ function registerAssetPackSettings() {
     name: "Patreon Manage URL",
     hint: "URL users open to manage subscription status.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "https://www.patreon.com/membership",
     restricted: true
@@ -665,7 +665,7 @@ function registerAssetPackSettings() {
     name: "Subscription Session Token",
     hint: "Per-user token issued by your backend after Patreon linking.",
     scope: "client",
-    config: true,
+    config: false,
     type: String,
     default: "",
     restricted: false
@@ -708,7 +708,7 @@ function registerAssetPackSettings() {
     name: "OpenAI API Key",
     hint: "Used when AI Image Provider is OpenAI.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "",
     restricted: true
@@ -718,7 +718,7 @@ function registerAssetPackSettings() {
     name: "BFL API Key",
     hint: "Used when AI Image Provider is Black Forest Labs (FLUX).",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "",
     restricted: true
@@ -1737,9 +1737,9 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
   if (!rootElement) return;
   if (rootElement.querySelector(".sceneforge-patreon-actions")) return;
 
-  const tokenInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_SUBSCRIPTION_AUTH_TOKEN}"]`);
-  const tokenGroup = tokenInput?.closest(".form-group");
-  if (!tokenGroup) return;
+  const accessCodeInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_SUBSCRIPTION_ACCESS_CODE}"]`);
+  const anchorGroup = accessCodeInput?.closest(".form-group");
+  if (!anchorGroup) return;
 
   const state = getSubscriptionAccountState();
   const remaining = state.unlimitedGenerations
@@ -1769,7 +1769,7 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
       <div>${foundry.utils.escapeHTML(usageLine)}</div>
     </div>
   `;
-  tokenGroup.after(actions);
+  anchorGroup.after(actions);
 
   const linkButton = actions.querySelector(".sceneforge-link-patreon");
   const syncButton = actions.querySelector(".sceneforge-sync-patreon");
