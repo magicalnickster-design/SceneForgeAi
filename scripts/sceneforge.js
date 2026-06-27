@@ -1158,17 +1158,13 @@ function registerSceneDirectoryEntryContextOptions(entryOptions) {
   entryOptions.push({
     name: "Edit Image (SceneForge AI)",
     icon: '<i class="fas fa-image"></i>',
-    condition: (li) => {
-      if (!game.user?.isGM) return false;
-      const scene = getSceneFromDirectoryLi(li);
-      if (!scene) return false;
-      const hasSceneForgeGeneration = Boolean(scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
-      const hasBackgroundImage = Boolean(getSceneBackgroundPath(scene));
-      return hasSceneForgeGeneration || hasBackgroundImage;
-    },
+    condition: () => game.user?.isGM === true,
     callback: async (li) => {
       const scene = getSceneFromDirectoryLi(li);
-      if (!scene) return;
+      if (!scene) {
+        ui.notifications.error("SceneForge AI: Could not resolve selected scene.");
+        return;
+      }
       await openSceneImageEditDialog(scene);
     }
   });
@@ -1266,6 +1262,25 @@ Hooks.on("getDocumentDirectoryEntryContext", (...args) => {
   registerSceneDirectoryEntryContextOptions(entryOptions);
 });
 
+// v13+ ApplicationV2 document context hook for scenes.
+Hooks.on("getSceneContextOptions", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+// Generic document hook in case specific scene hook is unavailable.
+Hooks.on("getDocumentContextOptions", (...args) => {
+  const applicationLike = args.find((arg) => arg && typeof arg === "object" && !Array.isArray(arg));
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  const documentName =
+    applicationLike?.documentName
+    ?? applicationLike?.collection?.documentName
+    ?? applicationLike?.constructor?.documentName
+    ?? null;
+  if (documentName && documentName !== "Scene") return;
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
 /**
  * Resolve a Scene document from a Scene Directory <li>.
  * The dataset key can vary by Foundry version, so we check multiple keys.
@@ -1275,12 +1290,19 @@ function getSceneFromDirectoryLi(li) {
     (li instanceof HTMLElement ? li : null)
     ?? (li?.[0] instanceof HTMLElement ? li[0] : null)
     ?? null;
+  const nearestWithDataset = element?.closest?.("[data-document-id], [data-entry-id], [data-scene-id], [data-uuid], li");
 
   const readDataValue = (key) => {
     const datasetKey = key.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
-    if (element?.dataset && element.dataset[datasetKey]) return element.dataset[datasetKey];
-    if (element?.getAttribute) {
-      const attrValue = element.getAttribute(`data-${key}`);
+    const fromElement = element?.dataset?.[datasetKey];
+    if (fromElement) return fromElement;
+    const fromNearest = nearestWithDataset?.dataset?.[datasetKey];
+    if (fromNearest) return fromNearest;
+    if (element?.getAttribute || nearestWithDataset?.getAttribute) {
+      const attrValue =
+        element?.getAttribute?.(`data-${key}`)
+        ?? nearestWithDataset?.getAttribute?.(`data-${key}`)
+        ?? null;
       if (attrValue) return attrValue;
     }
     if (typeof li?.data === "function") {
@@ -1297,10 +1319,32 @@ function getSceneFromDirectoryLi(li) {
     ?? readDataValue("entryId")
     ?? readDataValue("scene-id")
     ?? readDataValue("sceneId")
-    ?? readDataValue("id");
+    ?? readDataValue("id")
+    ?? li?.id
+    ?? li?.documentId
+    ?? li?.dataset?.documentId
+    ?? li?.dataset?.entryId
+    ?? li?.dataset?.sceneId
+    ?? null;
 
-  if (!sceneId) return null;
-  return game.scenes.get(sceneId) ?? null;
+  if (sceneId && game.scenes?.has(sceneId)) {
+    return game.scenes.get(sceneId) ?? null;
+  }
+
+  const sceneUuid =
+    readDataValue("uuid")
+    ?? readDataValue("document-uuid")
+    ?? readDataValue("documentUuid")
+    ?? li?.dataset?.uuid
+    ?? li?.dataset?.documentUuid
+    ?? li?.uuid
+    ?? null;
+  if (sceneUuid && typeof fromUuidSync === "function") {
+    const doc = fromUuidSync(sceneUuid);
+    if (doc?.documentName === "Scene") return doc;
+  }
+
+  return null;
 }
 
 /**
