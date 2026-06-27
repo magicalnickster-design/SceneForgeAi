@@ -605,25 +605,21 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
-    hint: "Select provider target. Subscription backend is recommended for Patreon-based access.",
+    hint: "SceneForge AI uses Patreon subscription backend access.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     choices: {
-      none: "None",
-      mock: "Mock Provider",
-      subscription: "Subscription Backend (Patreon)",
-      openai: "OpenAI (Legacy direct key)",
-      stability: "Stability placeholder"
+      subscription: "Subscription Backend (Patreon)"
     },
     default: "subscription"
   });
 
   game.settings.register(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE, {
     name: "Global Library Only Mode",
-    hint: "When enabled, generation requires Subscription Backend and only uses globally stored/reused maps. Disable for local testing with other providers.",
+    hint: "SceneForge AI uses global library mode for production.",
     scope: "world",
-    config: true,
+    config: false,
     type: Boolean,
     default: true,
     restricted: true
@@ -678,6 +674,8 @@ function registerAssetPackSettings() {
       linked: false,
       active: false,
       tier: "none",
+      isOwner: false,
+      unlimitedGenerations: false,
       accountName: "",
       accountEmail: "",
       accountId: "",
@@ -692,9 +690,9 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_API_KEY, {
     name: "OpenAI API Key",
-    hint: "Used only when AI Image Provider is OpenAI placeholder.",
+    hint: "Legacy hidden setting.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     default: "",
     restricted: true
@@ -702,9 +700,9 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT, {
     name: "OpenAI Monthly Generation Limit",
-    hint: "Hard cap on successful paid generations per month.",
+    hint: "Legacy hidden setting.",
     scope: "world",
-    config: true,
+    config: false,
     type: Number,
     default: 20,
     restricted: true
@@ -712,9 +710,9 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_CONFIRM_PAID_GENERATION, {
     name: "Confirm Before Paid Generation",
-    hint: "When enabled, a paid confirmation dialog is required before OpenAI generation.",
+    hint: "Legacy hidden setting.",
     scope: "world",
-    config: true,
+    config: false,
     type: Boolean,
     default: true,
     restricted: true
@@ -798,7 +796,8 @@ function getEnabledAssetPackIds() {
 }
 
 function getAiImageProvider() {
-  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "none");
+  // Production lock: customer builds always use Patreon subscription backend.
+  return "subscription";
 }
 
 function getOpenAiApiKey() {
@@ -826,6 +825,8 @@ function getSubscriptionAccountState() {
     linked: false,
     active: false,
     tier: "none",
+    isOwner: false,
+    unlimitedGenerations: false,
     accountName: "",
     accountEmail: "",
     accountId: "",
@@ -925,6 +926,22 @@ function normalizeSubscriptionStatusPayload(payload) {
     ?? payload?.user?.id
     ?? ""
   ).trim();
+  const ownerRaw =
+    payload?.isOwner
+    ?? payload?.owner
+    ?? payload?.account?.isOwner
+    ?? payload?.subscription?.isOwner
+    ?? false;
+  const isOwner = ownerRaw === true || String(ownerRaw).toLowerCase() === "true";
+  const unlimitedRaw =
+    payload?.unlimitedGenerations
+    ?? payload?.usage?.unlimited
+    ?? payload?.subscription?.unlimited
+    ?? false;
+  const hasUnlimitedFlag = unlimitedRaw === true || String(unlimitedRaw).toLowerCase() === "true";
+  const tierLower = tier.toLowerCase();
+  const unlimitedFromTier = tierLower.includes("owner") || tierLower.includes("admin") || tierLower.includes("creator");
+  const unlimitedGenerations = isOwner || hasUnlimitedFlag || unlimitedFromTier;
   const activeRaw = payload?.active ?? payload?.subscription?.active ?? payload?.isActive ?? false;
   const active = activeRaw === true || String(activeRaw).toLowerCase() === "true";
   const resetAt = payload?.resetAt ?? payload?.usage?.resetAt ?? payload?.periodEnd ?? null;
@@ -934,6 +951,8 @@ function normalizeSubscriptionStatusPayload(payload) {
     linked: Boolean(token || getSubscriptionAuthToken()),
     active,
     tier,
+    isOwner,
+    unlimitedGenerations,
     accountName,
     accountEmail,
     accountId,
@@ -957,6 +976,8 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
       linked: false,
       active: false,
       tier: "none",
+      isOwner: false,
+      unlimitedGenerations: false,
       accountName: "",
       accountEmail: "",
       accountId: "",
@@ -986,6 +1007,8 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
           linked: false,
           active: false,
           tier: "none",
+          isOwner: false,
+          unlimitedGenerations: false,
           accountName: "",
           accountEmail: "",
           accountId: "",
@@ -1008,7 +1031,8 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
     const state = await setSubscriptionAccountState(normalized);
     if (notify) {
       const remaining = Math.max(0, state.usageLimit - state.usageCount);
-      ui.notifications.info(`SceneForge AI: Patreon synced. Tier: ${state.tier}. Remaining this month: ${remaining}.`);
+      const remainingLabel = state.unlimitedGenerations ? "Unlimited" : String(remaining);
+      ui.notifications.info(`SceneForge AI: Patreon synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
     }
     return { ok: true, state, payload };
   } catch (error) {
@@ -1099,9 +1123,7 @@ function formatLinkedAccountLabel(state) {
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
-  const configured = game.settings.get(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE);
-  if (typeof configured === "boolean") return configured;
-  return GLOBAL_IMAGE_LIBRARY_ONLY === true;
+  return true;
 }
 
 function isPaidGenerationConfirmationEnabled() {
@@ -1680,13 +1702,18 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
   if (!tokenGroup) return;
 
   const state = getSubscriptionAccountState();
-  const remaining = Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
+  const remaining = state.unlimitedGenerations
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
   const linkedAccount = formatLinkedAccountLabel(state);
   const linkedLine = state.linked
     ? `Linked as: ${linkedAccount}`
     : "Linked as: Not linked";
-  const tierLine = `Tier: ${state.linked ? (state.tier || "unknown") : "none"}`;
-  const usageLine = `Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} (Remaining: ${remaining})`;
+  const ownerSuffix = state.isOwner ? " (Owner)" : "";
+  const tierLine = `Tier: ${state.linked ? (state.tier || "unknown") : "none"}${ownerSuffix}`;
+  const usageLine = state.unlimitedGenerations
+    ? `Monthly usage: ${state.usageCount ?? 0} / Unlimited`
+    : `Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} (Remaining: ${remaining})`;
 
   const actions = document.createElement("div");
   actions.className = "form-group sceneforge-patreon-actions";
@@ -2902,7 +2929,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         : "Patreon subscription is inactive."
     };
   }
-  if (subscriptionSync.ok && subscriptionState.usageLimit > 0 && subscriptionState.usageCount >= subscriptionState.usageLimit) {
+  if (
+    subscriptionSync.ok
+    && !subscriptionState.unlimitedGenerations
+    && subscriptionState.usageLimit > 0
+    && subscriptionState.usageCount >= subscriptionState.usageLimit
+  ) {
     return {
       provider,
       imageStatus: "failed",
