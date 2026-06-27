@@ -307,6 +307,23 @@ async function persistEditedSceneBackground(imageData, options = {}) {
   });
 }
 
+async function getImagePixelDimensions(imagePath) {
+  const src = String(imagePath ?? "").trim();
+  if (!src || typeof Image !== "function") return null;
+
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const width = Number(image.naturalWidth || image.width || 0);
+      const height = Number(image.naturalHeight || image.height || 0);
+      if (width > 0 && height > 0) resolve({ width, height });
+      else resolve(null);
+    };
+    image.onerror = () => resolve(null);
+    image.src = src;
+  });
+}
+
 /**
  * Scene sizes are expressed in grid cells.
  * Foundry stores scene dimensions in pixels.
@@ -1920,6 +1937,16 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         await scene.delete();
         ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
         return;
+      }
+
+      // Reduce blur by matching scene pixel dimensions to the generated image.
+      // The old fixed 50x50 grid at 100px (5000x5000) stretched 1024px maps heavily.
+      const imageDimensions = await getImagePixelDimensions(persistedBackgroundPath);
+      if (imageDimensions?.width && imageDimensions?.height) {
+        await scene.update({
+          width: imageDimensions.width,
+          height: imageDimensions.height
+        });
       }
 
       const backgroundApplyResult = await applyBackgroundToScene(scene, persistedBackgroundPath);
@@ -4192,6 +4219,11 @@ function compileInkarnatePrompt(prompt) {
     "90 DEGREE ORTHOGRAPHIC CAMERA",
     "GRIDLESS",
     "HAND PAINTED INKARNATE STYLE",
+    "CRISP LINEWORK",
+    "SHARP CLEAN EDGES",
+    "HIGH DETAIL TEXTURES",
+    "HIGH CONTRAST COLOR SEPARATION",
+    "VIBRANT READABLE COLORS",
     "D&D VTT MAP",
     "NO CHARACTERS",
     "NO TEXT",
