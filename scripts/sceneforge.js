@@ -56,6 +56,43 @@ function isDataUrl(value) {
   return typeof value === "string" && value.startsWith("data:");
 }
 
+function normalizePathForComparison(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (isDataUrl(raw)) return raw;
+
+  let normalized = raw;
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    normalized = `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    normalized = raw;
+  }
+
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch (_error) {
+    // Keep non-decoded value if malformed encoding is present.
+  }
+
+  normalized = normalized
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/^\//, "")
+    .replace(/[?#].*$/, "")
+    .trim();
+
+  return normalized;
+}
+
+function pathsLikelyMatch(leftPath, rightPath) {
+  const left = normalizePathForComparison(leftPath);
+  const right = normalizePathForComparison(rightPath);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+}
+
 function getFilePickerImpl() {
   return foundry?.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker ?? null;
 }
@@ -155,10 +192,13 @@ const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
 const ASSET_PATH_AVAILABILITY_CACHE = new Map();
 
 function getSceneBackgroundSrc(scene) {
-  if (!scene?.toObject) return null;
-  const objectData = scene.toObject();
+  const objectData = scene?.toObject ? scene.toObject() : null;
   return (
-    objectData?.background?.src
+    scene?.background?.src
+    ?? scene?._source?.background?.src
+    ?? objectData?.background?.src
+    ?? scene?.levels?.contents?.[0]?.background?.src
+    ?? scene?.levels?.contents?.[0]?.textures?.background?.src
     ?? objectData?.levels?.[0]?.background?.src
     ?? objectData?.levels?.[0]?.textures?.background?.src
     ?? null
@@ -187,7 +227,7 @@ async function applyBackgroundToScene(scene, backgroundSrc) {
     }
   });
   let finalBackgroundSrc = getSceneBackgroundSrc(scene);
-  if (finalBackgroundSrc === backgroundSrc || Boolean(finalBackgroundSrc)) {
+  if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
     return {
       applied: true,
       finalBackgroundSrc
@@ -201,12 +241,24 @@ async function applyBackgroundToScene(scene, backgroundSrc) {
       "background.src": backgroundSrc
     });
     finalBackgroundSrc = getSceneBackgroundSrc(scene);
-    if (finalBackgroundSrc === backgroundSrc || Boolean(finalBackgroundSrc)) {
+    if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
       return {
         applied: true,
         finalBackgroundSrc
       };
     }
+  }
+
+  // Attempt 3: dotted path update for versions storing flattened keys.
+  await scene.update({
+    "background.src": backgroundSrc
+  });
+  finalBackgroundSrc = getSceneBackgroundSrc(scene);
+  if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
+    return {
+      applied: true,
+      finalBackgroundSrc
+    };
   }
 
   return {
@@ -2245,7 +2297,11 @@ async function handleSceneImageEdit(scene, editConfig) {
     if (!persistedPath) throw new Error("No persisted edited image path returned.");
     const applyResult = await applyBackgroundToScene(scene, persistedPath);
     const finalBackgroundSrc = String(applyResult?.finalBackgroundSrc ?? "").trim();
-    if (!applyResult?.applied || finalBackgroundSrc !== String(persistedPath).trim()) {
+    const recheckedBackgroundSrc = getSceneBackgroundPath(scene);
+    const isVerified =
+      pathsLikelyMatch(finalBackgroundSrc, persistedPath)
+      || pathsLikelyMatch(recheckedBackgroundSrc, persistedPath);
+    if (!applyResult?.applied || !isVerified) {
       await applyBackgroundToScene(scene, originalBackgroundPath);
       throw new Error("Scene background verification failed after edit.");
     }
