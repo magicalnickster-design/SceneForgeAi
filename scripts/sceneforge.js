@@ -1586,8 +1586,12 @@ function buildGenerationConfigFromForm(form) {
     return null;
   }
 
-  const compiledImagePrompt = compileInkarnatePrompt(prompt, { imageOrientation });
   const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
+  const compiledImagePrompt = compileInkarnatePrompt(prompt, {
+    imageOrientation,
+    sceneSizeKey,
+    mapCoverageMeters
+  });
 
   const generationData = {
     generationMode,
@@ -4287,14 +4291,36 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 /**
  * Build the final image prompt by appending universal quality constraints.
  */
+function formatMapScalePromptInstruction(sceneSizeKey, mapCoverageMeters) {
+  const meters = Number.isFinite(Number(mapCoverageMeters)) ? Math.max(1, Math.round(Number(mapCoverageMeters))) : 250;
+  const miles = meters / 1609.344;
+  const milesLabel = miles >= 0.1
+    ? `${miles.toFixed(2)} miles`
+    : `${Math.round(miles * 5280)} feet`;
+  const scaleGuidance = {
+    small: "SMALL SCALE BATTLE MAP COMPOSITION",
+    medium: "LOCAL AREA MAP COMPOSITION WITH MULTIPLE POINTS OF INTEREST",
+    large: "LARGE DISTRICT SCALE COMPOSITION WITH BROAD SPATIAL COVERAGE",
+    xlarge: "REGIONAL SCALE COMPOSITION SHOWING A WIDE AREA ACROSS THE MAP"
+  }[sceneSizeKey] ?? "LOCAL AREA MAP COMPOSITION WITH MULTIPLE POINTS OF INTEREST";
+
+  return [
+    `MAP SCALE TARGET: APPROXIMATELY ${meters} METERS WIDE (${milesLabel})`,
+    scaleGuidance,
+    "FRAME THE ENTIRE MAP AS A WIDE-AREA OVERVIEW, NOT A CLOSE-UP ENCOUNTER SHOT"
+  ];
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
+  const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
     "90 DEGREE ORTHOGRAPHIC CAMERA",
     orientationSpec.promptLine,
+    ...scaleLines,
     "GRIDLESS",
     "HAND PAINTED INKARNATE STYLE",
     "CRISP LINEWORK",
