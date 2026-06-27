@@ -4,7 +4,7 @@
  * This version keeps the original MVP behavior, then adds:
  *  - seeded deterministic generation
  *  - multiple themed layout variations
- *  - "Regenerate Layout" option in Scene Directory context menu
+ *  - Scene directory context menu actions for image edit, preset IO, and voting
  *  - per-document flags so regeneration only removes SceneForge content
  *
  * There is still NO real AI call here. Layouts are template-driven.
@@ -1269,7 +1269,6 @@ Hooks.on("renderSceneDirectory", (app, html) => {
 
 /**
  * Add a right-click context menu item to each scene in Scene Directory.
- * This is where we expose "Regenerate Layout".
  */
 function registerSceneDirectoryEntryContextOptions(entryOptions) {
   if (!Array.isArray(entryOptions)) return;
@@ -1286,21 +1285,6 @@ function registerSceneDirectoryEntryContextOptions(entryOptions) {
         return;
       }
       await openSceneImageEditDialog(scene);
-    }
-  });
-
-  entryOptions.push({
-    name: "SceneForge: Regenerate Layout",
-    icon: '<i class="fas fa-arrows-rotate"></i>',
-    condition: (li) => {
-      if (!game.user?.isGM) return false;
-      const scene = getSceneFromDirectoryLi(li);
-      return Boolean(scene?.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
-    },
-    callback: async (li) => {
-      const scene = getSceneFromDirectoryLi(li);
-      if (!scene) return;
-      await regenerateSceneFromFlags(scene);
     }
   });
 
