@@ -449,6 +449,34 @@ Hooks.once("init", () => {
 });
 
 /**
+ * Cleanup for legacy SceneForge journal artifacts from older versions.
+ * These are no longer used in AI-image-only mode and can trigger startup
+ * validation issues in newer Foundry versions if old page payloads linger.
+ */
+async function cleanupLegacyGeneratedJournals() {
+  if (!game.user?.isGM) return;
+  const journals = Array.from(game.journal?.contents ?? []);
+  const generatedIds = journals
+    .filter((doc) => doc?.getFlag(MODULE_ID, FLAG_GENERATED_KEY) === true)
+    .map((doc) => doc.id)
+    .filter((id) => typeof id === "string" && id.length > 0);
+
+  if (generatedIds.length === 0) return;
+
+  try {
+    await JournalEntry.deleteDocuments(generatedIds);
+    debugLog(`Removed ${generatedIds.length} legacy SceneForge journal entries.`);
+    ui.notifications.info(`SceneForge AI: Removed ${generatedIds.length} legacy SceneForge journal entries.`);
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed to cleanup legacy journals`, error);
+  }
+}
+
+Hooks.once("ready", () => {
+  void cleanupLegacyGeneratedJournals();
+});
+
+/**
  * Registers user-facing module settings for optional asset packs.
  * Location in Foundry: Game Settings -> Configure Settings -> Module Settings.
  */
@@ -3032,6 +3060,8 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
  * If import proceeds without required packs, drop a warning journal note in scene.
  */
 async function createMissingPackWarningJournalNote(scene, missingPacks) {
+  if (!ENABLE_JOURNALS_AND_NOTES) return;
+
   const content = `
 <h2>SceneForge Import Warning</h2>
 <p>This preset was built with asset packs not currently enabled:</p>
