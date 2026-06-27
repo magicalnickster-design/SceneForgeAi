@@ -582,10 +582,8 @@ async function enforceProductionSettingsDefaults() {
   // Only a GM can persist world-scoped defaults.
   if (!game.user?.isGM) return;
   try {
-    const currentProvider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "").trim().toLowerCase();
-    if (currentProvider !== "black-forest-labs" && currentProvider !== "subscription") {
-      await game.settings.set(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, "black-forest-labs");
-    }
+    // Force BFL cloud mode via backend regardless of legacy local-provider values.
+    await game.settings.set(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, "black-forest-labs");
 
     const backendUrl = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim();
     if (!backendUrl) {
@@ -600,6 +598,14 @@ async function enforceProductionSettingsDefaults() {
     const manageUrl = String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
     if (!manageUrl) {
       await game.settings.set(MODULE_ID, SETTING_PATREON_MANAGE_URL, DEFAULT_PATREON_MANAGE_URL);
+    }
+
+    // Prevent stale direct-provider credentials from creating ambiguity.
+    if (String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim()) {
+      await game.settings.set(MODULE_ID, SETTING_OPENAI_API_KEY, "");
+    }
+    if (String(game.settings.get(MODULE_ID, SETTING_BFL_API_KEY) ?? "").trim()) {
+      await game.settings.set(MODULE_ID, SETTING_BFL_API_KEY, "");
     }
   } catch (error) {
     debugLog("Could not enforce production settings defaults", error?.message ?? error);
@@ -640,15 +646,12 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
-    hint: "Select image provider for map generation.",
+    hint: "SceneForge Cloud provider (BFL via backend).",
     scope: "world",
     config: false,
     type: String,
     choices: {
-      "black-forest-labs": "Black Forest Labs (via Subscription Backend)",
-      subscription: "Subscription Backend (Patreon)",
-      bfl: "Black Forest Labs (FLUX)",
-      openai: "OpenAI"
+      "black-forest-labs": "Black Forest Labs (via Subscription Backend)"
     },
     default: "black-forest-labs"
   });
@@ -2919,60 +2922,11 @@ async function openSceneImageEditDialog(scene) {
  * Real generation is currently enabled only for the OpenAI provider path.
  */
 async function generateAiMapImage(compiledPrompt, options = {}) {
-  const configuredProvider = getAiImageProvider();
-  const provider = configuredProvider;
+  // Production hard-lock: all generation goes through subscription backend,
+  // where BFL keys are server-side only.
+  const provider = "subscription";
   console.info(`${MODULE_ID} | AI image provider selected: ${provider}`);
-
-  if (provider === "none") {
-    return {
-      provider,
-      imageStatus: "failed",
-      imagePath: null,
-      costEstimate: {
-        preview: "$0.00 mock",
-        final: "$0.08 placeholder"
-      },
-      errorMessage: "No AI image provider selected."
-    };
-  }
-
-  if (provider === "mock") {
-    debugLog("Mock provider compiled prompt", compiledPrompt);
-    const imagePath = buildMockMapBackgroundDataUri(options);
-    return {
-      provider: "mock",
-      imageStatus: "mock-generated",
-      imagePath,
-      costEstimate: {
-        preview: "$0.00 mock",
-        final: "$0.08 placeholder"
-      }
-    };
-  }
-
-  if (provider === "subscription") {
-    return generateSubscriptionMapImage(compiledPrompt, options);
-  }
-
-  if (provider === "bfl") {
-    return generateBflMapImage(compiledPrompt, options);
-  }
-
-  if (provider === "openai") {
-    debugLog("OpenAI generation path called");
-    return generateOpenAiMapImage(compiledPrompt, options);
-  }
-
-  // Placeholder architecture for not-yet-implemented providers.
-  return {
-    provider: configuredProvider,
-    imageStatus: "not-generated",
-    imagePath: null,
-    costEstimate: {
-      preview: "$0.00 mock",
-      final: "$0.08 placeholder"
-    }
-  };
+  return generateSubscriptionMapImage(compiledPrompt, options);
 }
 
 async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
