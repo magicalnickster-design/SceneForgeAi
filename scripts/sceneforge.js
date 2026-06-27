@@ -651,7 +651,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: true,
     type: String,
-    default: "",
+    default: "https://www.patreon.com/GambitsForge",
     restricted: true
   });
 
