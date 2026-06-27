@@ -1151,7 +1151,10 @@ Hooks.on("renderSceneDirectory", (app, html) => {
  * Add a right-click context menu item to each scene in Scene Directory.
  * This is where we expose "Regenerate Layout".
  */
-Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
+function registerSceneDirectoryEntryContextOptions(entryOptions) {
+  if (!Array.isArray(entryOptions)) return;
+  if (entryOptions.some((option) => option?.name === "Edit Image (SceneForge AI)")) return;
+
   entryOptions.push({
     name: "Edit Image (SceneForge AI)",
     icon: '<i class="fas fa-image"></i>',
@@ -1243,6 +1246,24 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
       dialog.render(true);
     }
   });
+}
+
+Hooks.on("getSceneDirectoryEntryContext", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+// v13+ compatibility fallback for generic document directory context hook.
+Hooks.on("getDocumentDirectoryEntryContext", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  const directoryLike = args.find((arg) => arg && typeof arg === "object" && !Array.isArray(arg));
+  const documentName =
+    directoryLike?.documentName
+    ?? directoryLike?.constructor?.documentName
+    ?? directoryLike?.collection?.documentName
+    ?? null;
+  if (documentName && documentName !== "Scene") return;
+  registerSceneDirectoryEntryContextOptions(entryOptions);
 });
 
 /**
@@ -1250,14 +1271,33 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
  * The dataset key can vary by Foundry version, so we check multiple keys.
  */
 function getSceneFromDirectoryLi(li) {
-  const jq = li?.jquery ? li : $(li);
+  const element =
+    (li instanceof HTMLElement ? li : null)
+    ?? (li?.[0] instanceof HTMLElement ? li[0] : null)
+    ?? null;
+
+  const readDataValue = (key) => {
+    const datasetKey = key.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+    if (element?.dataset && element.dataset[datasetKey]) return element.dataset[datasetKey];
+    if (element?.getAttribute) {
+      const attrValue = element.getAttribute(`data-${key}`);
+      if (attrValue) return attrValue;
+    }
+    if (typeof li?.data === "function") {
+      const value = li.data(datasetKey) ?? li.data(key);
+      if (value) return value;
+    }
+    return null;
+  };
+
   const sceneId =
-    jq?.data?.("documentId")
-    ?? jq?.data?.("entryId")
-    ?? li?.[0]?.dataset?.documentId
-    ?? li?.[0]?.dataset?.entryId
-    ?? li?.dataset?.documentId
-    ?? li?.dataset?.entryId;
+    readDataValue("document-id")
+    ?? readDataValue("documentId")
+    ?? readDataValue("entry-id")
+    ?? readDataValue("entryId")
+    ?? readDataValue("scene-id")
+    ?? readDataValue("sceneId")
+    ?? readDataValue("id");
 
   if (!sceneId) return null;
   return game.scenes.get(sceneId) ?? null;
