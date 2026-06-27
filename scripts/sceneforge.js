@@ -2993,8 +2993,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
+  const normalizedPrompt = String(compiledPrompt ?? "").trim();
   const requestPayload = {
-    compiledPrompt,
+    compiledPrompt: normalizedPrompt,
+    // Compatibility aliases for backend variants that expect generic keys.
+    prompt: normalizedPrompt,
+    input: normalizedPrompt,
     seed: options.seed ?? null,
     plan: options.plan ?? null,
     layoutGraph: options.layoutGraph ?? null,
