@@ -462,6 +462,9 @@ const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
+const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
+const DEFAULT_PATREON_CONNECT_URL = "https://sceneforge-backend.onrender.com/api/auth/patreon/connect";
+const DEFAULT_PATREON_MANAGE_URL = "https://www.patreon.com/membership";
 
 /**
  * Base registry ships with the core module.
@@ -570,9 +573,38 @@ async function cleanupLegacyGeneratedJournals() {
 
 Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
+  void enforceProductionSettingsDefaults();
   void maybeBootstrapPatreonSessionFromUrl();
   void syncPatreonSubscriptionStatus({ notify: false });
 });
+
+async function enforceProductionSettingsDefaults() {
+  // Only a GM can persist world-scoped defaults.
+  if (!game.user?.isGM) return;
+  try {
+    const currentProvider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "").trim().toLowerCase();
+    if (currentProvider !== "black-forest-labs" && currentProvider !== "subscription") {
+      await game.settings.set(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, "black-forest-labs");
+    }
+
+    const backendUrl = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim();
+    if (!backendUrl) {
+      await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, DEFAULT_BACKEND_URL);
+    }
+
+    const connectUrl = String(game.settings.get(MODULE_ID, SETTING_PATREON_CONNECT_URL) ?? "").trim();
+    if (!connectUrl) {
+      await game.settings.set(MODULE_ID, SETTING_PATREON_CONNECT_URL, DEFAULT_PATREON_CONNECT_URL);
+    }
+
+    const manageUrl = String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
+    if (!manageUrl) {
+      await game.settings.set(MODULE_ID, SETTING_PATREON_MANAGE_URL, DEFAULT_PATREON_MANAGE_URL);
+    }
+  } catch (error) {
+    debugLog("Could not enforce production settings defaults", error?.message ?? error);
+  }
+}
 
 /**
  * Registers user-facing module settings for optional asset packs.
@@ -637,7 +669,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: false,
     type: String,
-    default: "https://sceneforge-backend.onrender.com",
+    default: DEFAULT_BACKEND_URL,
     restricted: true
   });
 
@@ -647,7 +679,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: false,
     type: String,
-    default: "https://sceneforge-backend.onrender.com/api/auth/patreon/connect",
+    default: DEFAULT_PATREON_CONNECT_URL,
     restricted: true
   });
 
@@ -657,7 +689,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: false,
     type: String,
-    default: "https://www.patreon.com/membership",
+    default: DEFAULT_PATREON_MANAGE_URL,
     restricted: true
   });
 
@@ -823,8 +855,9 @@ function getEnabledAssetPackIds() {
 
 function getAiImageProvider() {
   const provider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
-  if (provider === "black-forest-labs") return "subscription";
-  return provider;
+  // Customer mode always routes image generation through subscription backend.
+  if (provider === "black-forest-labs" || provider === "subscription") return "subscription";
+  return "subscription";
 }
 
 function getOpenAiApiKey() {
