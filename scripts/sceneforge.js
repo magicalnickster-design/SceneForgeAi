@@ -2611,6 +2611,7 @@ async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) 
       filenamePrefix: "sceneforge-edit-reference"
     });
     const endpoint = "https://api.openai.com/v1/images/edits";
+    debugLog("OpenAI endpoint called:", endpoint);
     const form = new FormData();
     form.append("model", "gpt-image-1");
     form.append("prompt", String(editPrompt ?? ""));
@@ -2643,6 +2644,9 @@ async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) 
       });
       throw new Error(`OpenAI image edit request failed (${response.status}).`);
     }
+
+    debugLog("OpenAI response headers", [...response.headers.entries()]);
+    debugLog("OpenAI success response", await response.clone().text());
 
     const payload = await response.json();
     const first = payload?.data?.[0] ?? null;
@@ -3094,6 +3098,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
 
   try {
     const endpoint = "https://api.openai.com/v1/images/generations";
+    debugLog("OpenAI endpoint called:", endpoint);
     console.info(`${MODULE_ID} | OpenAI endpoint: ${endpoint} (model: gpt-image-1)`);
     const requestPayload = {
       model: "gpt-image-1",
@@ -3125,6 +3130,9 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
       });
       throw new Error(`OpenAI image request failed (${response.status}).`);
     }
+
+    debugLog("OpenAI response headers", [...response.headers.entries()]);
+    debugLog("OpenAI success response", await response.clone().text());
 
     const payload = await response.json();
     const first = payload?.data?.[0] ?? null;
