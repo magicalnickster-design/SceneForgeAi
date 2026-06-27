@@ -3,6 +3,7 @@
 This utility repairs bad world data left by older modules where a journal page has:
 
 - `type: "mastercrafted.mastercrafted"`
+- `type: "gatherer.gatherer"`
 
 It converts those pages to:
 
@@ -44,7 +45,9 @@ node scripts/repair-journal-page-types.mjs "/path/to/Data/worlds" --dry-run
 
 For each `JournalEntry` record with `pages[]` entries:
 
-- If `page.type === "mastercrafted.mastercrafted"`:
+- If page type is one of:
+  - `mastercrafted.mastercrafted`
+  - `gatherer.gatherer`
   - set `page.type = "text"`
   - preserve existing `page.text` where possible
   - if no compatible text exists, create fallback `text.content` with preserved serialized page data

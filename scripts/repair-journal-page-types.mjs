@@ -4,7 +4,7 @@
  *
  * Purpose:
  *   Repair invalid Foundry JournalEntryPage records left by old module data by
- *   converting page type "mastercrafted.mastercrafted" to "text".
+ *   converting invalid custom page types to "text".
  *
  * Important:
  *   - This is NOT runtime module logic.
@@ -15,7 +15,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const INVALID_TYPE = "mastercrafted.mastercrafted";
+const INVALID_TYPES = new Set([
+  "mastercrafted.mastercrafted",
+  "gatherer.gatherer"
+]);
 const REPLACEMENT_TYPE = "text";
 
 function printUsage() {
@@ -54,7 +57,7 @@ function buildFallbackPageText(page) {
 
 function repairPage(page) {
   if (!page || typeof page !== "object") return { page, changed: false };
-  if (page.type !== INVALID_TYPE) return { page, changed: false };
+  if (!INVALID_TYPES.has(page.type)) return { page, changed: false };
 
   const repaired = { ...page, type: REPLACEMENT_TYPE };
   if (!repaired.text || typeof repaired.text !== "object") {
@@ -150,7 +153,8 @@ async function resolveJournalTargets(inputPath) {
 
 async function repairJournalFile(filePath, { dryRun }) {
   const raw = await fs.readFile(filePath, "utf8");
-  if (!raw.includes(INVALID_TYPE)) {
+  const hasKnownInvalidType = Array.from(INVALID_TYPES).some((typeValue) => raw.includes(typeValue));
+  if (!hasKnownInvalidType) {
     return { filePath, scanned: true, changed: false, pagesChanged: 0, docsChanged: 0, backupPath: null };
   }
 
@@ -228,7 +232,8 @@ async function main() {
     process.exit(0);
   }
 
-  console.log(`Scanning ${journalFiles.length} journal.db file(s) for "${INVALID_TYPE}"...`);
+  console.log(`Scanning ${journalFiles.length} journal.db file(s) for known invalid page types...`);
+  console.log(`- ${Array.from(INVALID_TYPES).join(", ")}`);
   let totalDocsChanged = 0;
   let totalPagesChanged = 0;
   let filesChanged = 0;
