@@ -449,6 +449,7 @@ const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
 const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
 const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
 const SETTING_OPENAI_API_KEY = "openAiApiKey";
+const SETTING_BFL_API_KEY = "bflApiKey";
 const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
@@ -605,12 +606,14 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
-    hint: "SceneForge AI uses Patreon subscription backend access.",
+    hint: "Select image provider for map generation.",
     scope: "world",
-    config: false,
+    config: true,
     type: String,
     choices: {
-      subscription: "Subscription Backend (Patreon)"
+      subscription: "Subscription Backend (Patreon)",
+      bfl: "Black Forest Labs (FLUX)",
+      openai: "OpenAI"
     },
     default: "subscription"
   });
@@ -690,9 +693,19 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_API_KEY, {
     name: "OpenAI API Key",
-    hint: "Legacy hidden setting.",
+    hint: "Used when AI Image Provider is OpenAI.",
     scope: "world",
-    config: false,
+    config: true,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_BFL_API_KEY, {
+    name: "BFL API Key",
+    hint: "Used when AI Image Provider is Black Forest Labs (FLUX).",
+    scope: "world",
+    config: true,
     type: String,
     default: "",
     restricted: true
@@ -796,12 +809,15 @@ function getEnabledAssetPackIds() {
 }
 
 function getAiImageProvider() {
-  // Production lock: customer builds always use Patreon subscription backend.
-  return "subscription";
+  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
 }
 
 function getOpenAiApiKey() {
   return String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim();
+}
+
+function getBflApiKey() {
+  return String(game.settings.get(MODULE_ID, SETTING_BFL_API_KEY) ?? "").trim();
 }
 
 function getSubscriptionBackendUrl() {
@@ -1124,6 +1140,9 @@ function formatLinkedAccountLabel(state) {
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
+  if (getAiImageProvider() !== "subscription") return false;
+  const configured = game.settings.get(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE);
+  if (typeof configured === "boolean") return configured;
   return true;
 }
 
@@ -2495,6 +2514,11 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     ui.notifications.error("SceneForge AI: OpenAI API key required before AI map generation.");
     return;
   }
+  if (provider === "bfl" && !getBflApiKey()) {
+    logImagePipelineError("BFL API key missing", { provider });
+    ui.notifications.error("SceneForge AI: BFL API key required before AI map generation.");
+    return;
+  }
   if (provider === "openai") {
     debugLog("OpenAI generation path called");
   }
@@ -2878,6 +2902,10 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
     return generateSubscriptionMapImage(compiledPrompt, options);
   }
 
+  if (provider === "bfl") {
+    return generateBflMapImage(compiledPrompt, options);
+  }
+
   if (provider === "openai") {
     debugLog("OpenAI generation path called");
     return generateOpenAiMapImage(compiledPrompt, options);
@@ -3111,6 +3139,176 @@ function extractSubscriptionGenerationMetadata(payload, backendEndpoint) {
       pricing: normalizedPayload?.pricing ?? null
     }
   };
+}
+
+function parseImageSizeToBflDimensions(imageSize) {
+  const raw = String(imageSize ?? "").trim();
+  const match = raw.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!match) return { width: 1024, height: 1024 };
+  const width = Math.max(256, Number(match[1] ?? 1024));
+  const height = Math.max(256, Number(match[2] ?? 1024));
+  return { width, height };
+}
+
+async function generateBflMapImage(compiledPrompt, options = {}) {
+  const provider = "bfl";
+  const costEstimate = {
+    preview: "$0.00 mock",
+    final: "BFL variable"
+  };
+  const apiKey = getBflApiKey();
+  if (!apiKey) {
+    logImagePipelineError("BFL API key missing", { provider });
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "BFL API key required before AI map generation."
+    };
+  }
+
+  const submitEndpoint = "https://api.bfl.ai/v1/flux-pro-1.1";
+  const { width, height } = parseImageSizeToBflDimensions(options.imageSize ?? "1024x1024");
+  const requestPayload = {
+    prompt: String(compiledPrompt ?? ""),
+    width,
+    height
+  };
+
+  try {
+    debugLog("BFL endpoint called:", submitEndpoint);
+    debugLog("BFL request metadata", {
+      endpoint: submitEndpoint,
+      method: "POST",
+      hasApiKey: true,
+      width,
+      height
+    });
+
+    const submitResponse = await fetch(submitEndpoint, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "Content-Type": "application/json",
+        "x-key": apiKey
+      },
+      body: JSON.stringify(requestPayload)
+    });
+    const submitPayload = await submitResponse.json().catch(() => ({}));
+    if (!submitResponse.ok) {
+      const message = String(submitPayload?.error ?? submitPayload?.message ?? "");
+      logImagePipelineError("BFL submit request failed", {
+        provider,
+        endpoint: submitEndpoint,
+        status: submitResponse.status,
+        message
+      });
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: message || `BFL generation request failed (${submitResponse.status}).`
+      };
+    }
+
+    const generationId = String(submitPayload?.id ?? "").trim();
+    const pollingUrl = String(
+      submitPayload?.polling_url
+      ?? (generationId ? `https://api.bfl.ai/v1/get_result?id=${encodeURIComponent(generationId)}` : "")
+    ).trim();
+    if (!pollingUrl) {
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: "BFL generation response did not include polling URL."
+      };
+    }
+    debugLog("BFL endpoint called:", pollingUrl);
+
+    const startedAt = Date.now();
+    const timeoutMs = 120000;
+    while (Date.now() - startedAt < timeoutMs) {
+      const pollResponse = await fetch(pollingUrl, {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+          "x-key": apiKey
+        }
+      });
+      const pollPayload = await pollResponse.json().catch(() => ({}));
+      if (!pollResponse.ok) {
+        const message = String(pollPayload?.error ?? pollPayload?.message ?? "");
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: message || `BFL polling request failed (${pollResponse.status}).`
+        };
+      }
+
+      const status = String(pollPayload?.status ?? "").trim().toLowerCase();
+      if (status === "ready") {
+        const imagePath = String(pollPayload?.result?.sample ?? "").trim();
+        if (!imagePath) {
+          return {
+            provider,
+            imageStatus: "failed",
+            imagePath: null,
+            costEstimate,
+            errorMessage: "BFL response was Ready but no image URL was returned."
+          };
+        }
+        return {
+          provider,
+          imageStatus: "complete",
+          imagePath,
+          costEstimate,
+          generationMetadata: {
+            provider: "bfl",
+            model: "flux-pro-1.1",
+            endpoint: submitEndpoint,
+            estimatedCost: null,
+            generationId,
+            imageCount: 1
+          }
+        };
+      }
+      if (status === "error" || status === "failed" || status.includes("moderat") || status === "task not found") {
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: String(pollPayload?.error ?? pollPayload?.message ?? `BFL generation failed with status: ${status}`)
+        };
+      }
+
+      // BFL async generation requires polling until Ready.
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "BFL generation timed out while waiting for result."
+    };
+  } catch (error) {
+    logImagePipelineError("BFL generation exception", { provider, endpoint: submitEndpoint }, error);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `BFL generation failed: ${error?.message ?? "unknown error"}`
+    };
+  }
 }
 
 /**
