@@ -678,6 +678,9 @@ function registerAssetPackSettings() {
       linked: false,
       active: false,
       tier: "none",
+      accountName: "",
+      accountEmail: "",
+      accountId: "",
       monthKey: "",
       usageCount: 0,
       usageLimit: 0,
@@ -823,6 +826,9 @@ function getSubscriptionAccountState() {
     linked: false,
     active: false,
     tier: "none",
+    accountName: "",
+    accountEmail: "",
+    accountId: "",
     monthKey: "",
     usageCount: 0,
     usageLimit: 0,
@@ -896,6 +902,29 @@ function normalizeSubscriptionStatusPayload(payload) {
   const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? payload?.usedThisMonth ?? 0);
   const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? getCurrentUsageMonthKey());
   const tier = String(payload?.tier ?? payload?.subscription?.tier ?? payload?.plan ?? "none");
+  const accountName = String(
+    payload?.accountName
+    ?? payload?.patreon?.fullName
+    ?? payload?.patreon?.name
+    ?? payload?.member?.full_name
+    ?? payload?.member?.name
+    ?? payload?.user?.name
+    ?? ""
+  ).trim();
+  const accountEmail = String(
+    payload?.accountEmail
+    ?? payload?.patreon?.email
+    ?? payload?.member?.email
+    ?? payload?.user?.email
+    ?? ""
+  ).trim();
+  const accountId = String(
+    payload?.accountId
+    ?? payload?.patreon?.id
+    ?? payload?.member?.id
+    ?? payload?.user?.id
+    ?? ""
+  ).trim();
   const activeRaw = payload?.active ?? payload?.subscription?.active ?? payload?.isActive ?? false;
   const active = activeRaw === true || String(activeRaw).toLowerCase() === "true";
   const resetAt = payload?.resetAt ?? payload?.usage?.resetAt ?? payload?.periodEnd ?? null;
@@ -905,6 +934,9 @@ function normalizeSubscriptionStatusPayload(payload) {
     linked: Boolean(token || getSubscriptionAuthToken()),
     active,
     tier,
+    accountName,
+    accountEmail,
+    accountId,
     monthKey,
     usageCount: Number.isFinite(usageCount) ? Math.max(0, usageCount) : 0,
     usageLimit: Number.isFinite(usageLimit) ? Math.max(0, usageLimit) : 0,
@@ -925,6 +957,9 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
       linked: false,
       active: false,
       tier: "none",
+      accountName: "",
+      accountEmail: "",
+      accountId: "",
       monthKey: getCurrentUsageMonthKey(),
       usageCount: 0,
       usageLimit: 0,
@@ -951,6 +986,9 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
           linked: false,
           active: false,
           tier: "none",
+          accountName: "",
+          accountEmail: "",
+          accountId: "",
           monthKey: getCurrentUsageMonthKey(),
           usageCount: 0,
           usageLimit: 0,
@@ -1047,6 +1085,17 @@ async function linkPatreonAccount() {
   });
 
   await syncPatreonSubscriptionStatus({ notify: true });
+}
+
+function formatLinkedAccountLabel(state) {
+  const name = String(state?.accountName ?? "").trim();
+  const email = String(state?.accountEmail ?? "").trim();
+  const accountId = String(state?.accountId ?? "").trim();
+  if (name && email) return `${name} (${email})`;
+  if (name) return name;
+  if (email) return email;
+  if (accountId) return `Patreon ID ${accountId}`;
+  return "Unknown Patreon account";
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
@@ -1632,8 +1681,9 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
 
   const state = getSubscriptionAccountState();
   const remaining = Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
+  const linkedAccount = formatLinkedAccountLabel(state);
   const statusText = state.linked
-    ? `Linked tier: ${state.tier || "unknown"} | Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} | Remaining: ${remaining}`
+    ? `Linked as: ${linkedAccount} | Tier: ${state.tier || "unknown"} | Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} | Remaining: ${remaining}`
     : "Patreon not linked.";
 
   const actions = document.createElement("div");
