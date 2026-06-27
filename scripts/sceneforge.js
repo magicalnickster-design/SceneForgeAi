@@ -456,6 +456,7 @@ const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
 const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
 const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
 const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
+const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 
@@ -566,6 +567,8 @@ async function cleanupLegacyGeneratedJournals() {
 
 Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
+  void maybeBootstrapPatreonSessionFromUrl();
+  void syncPatreonSubscriptionStatus({ notify: false });
 });
 
 /**
@@ -663,6 +666,24 @@ function registerAssetPackSettings() {
     config: true,
     type: String,
     default: "",
+    restricted: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, {
+    name: "Subscription Account State",
+    scope: "client",
+    config: false,
+    type: Object,
+    default: {
+      linked: false,
+      active: false,
+      tier: "none",
+      monthKey: "",
+      usageCount: 0,
+      usageLimit: 0,
+      resetAt: null,
+      lastSyncAt: null
+    },
     restricted: false
   });
 
@@ -797,6 +818,36 @@ function getSubscriptionAuthToken() {
   return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
 }
 
+function getSubscriptionAccountState() {
+  const fallback = {
+    linked: false,
+    active: false,
+    tier: "none",
+    monthKey: "",
+    usageCount: 0,
+    usageLimit: 0,
+    resetAt: null,
+    lastSyncAt: null
+  };
+  const value = game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE);
+  if (!value || typeof value !== "object") return fallback;
+  return { ...fallback, ...value };
+}
+
+async function setSubscriptionAuthToken(token) {
+  await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN, String(token ?? "").trim());
+}
+
+async function setSubscriptionAccountState(patch = {}) {
+  const nextState = {
+    ...getSubscriptionAccountState(),
+    ...(patch && typeof patch === "object" ? patch : {}),
+    lastSyncAt: new Date().toISOString()
+  };
+  await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, nextState);
+  return nextState;
+}
+
 function getOpenAiMonthlyLimit() {
   return Math.max(0, Number(game.settings.get(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT) ?? 0));
 }
@@ -811,6 +862,191 @@ function getSceneGridPixelSize(sceneSizeKey) {
 
 function getImageOrientationSpec(imageOrientationKey) {
   return IMAGE_ORIENTATION_SPECS[imageOrientationKey] ?? IMAGE_ORIENTATION_SPECS.landscape;
+}
+
+function getPatreonLinkEndpoint() {
+  const connectUrl = getPatreonConnectUrl();
+  if (connectUrl) return connectUrl;
+  const backend = getSubscriptionBackendUrl();
+  if (!backend) return "";
+  return `${backend}/api/auth/patreon/connect`;
+}
+
+function buildPatreonLinkUrl() {
+  const endpoint = getPatreonLinkEndpoint();
+  if (!endpoint) return "";
+  try {
+    const url = new URL(endpoint, window.location.origin);
+    url.searchParams.set("source", MODULE_ID);
+    url.searchParams.set("returnUrl", window.location.href);
+    return url.toString();
+  } catch (_error) {
+    return endpoint;
+  }
+}
+
+function extractSubscriptionTokenFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const token = payload.subscriptionToken ?? payload.authToken ?? payload.token ?? payload.accessToken ?? "";
+  return String(token ?? "").trim();
+}
+
+function normalizeSubscriptionStatusPayload(payload) {
+  const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? payload?.monthlyLimit ?? 0);
+  const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? payload?.usedThisMonth ?? 0);
+  const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? getCurrentUsageMonthKey());
+  const tier = String(payload?.tier ?? payload?.subscription?.tier ?? payload?.plan ?? "none");
+  const activeRaw = payload?.active ?? payload?.subscription?.active ?? payload?.isActive ?? false;
+  const active = activeRaw === true || String(activeRaw).toLowerCase() === "true";
+  const resetAt = payload?.resetAt ?? payload?.usage?.resetAt ?? payload?.periodEnd ?? null;
+  const token = extractSubscriptionTokenFromPayload(payload);
+
+  return {
+    linked: Boolean(token || getSubscriptionAuthToken()),
+    active,
+    tier,
+    monthKey,
+    usageCount: Number.isFinite(usageCount) ? Math.max(0, usageCount) : 0,
+    usageLimit: Number.isFinite(usageLimit) ? Math.max(0, usageLimit) : 0,
+    resetAt
+  };
+}
+
+async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  if (!backendBaseUrl) {
+    if (notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
+    return { ok: false, reason: "missing-backend-url" };
+  }
+
+  const token = getSubscriptionAuthToken();
+  if (!token) {
+    await setSubscriptionAccountState({
+      linked: false,
+      active: false,
+      tier: "none",
+      monthKey: getCurrentUsageMonthKey(),
+      usageCount: 0,
+      usageLimit: 0,
+      resetAt: null
+    });
+    if (notify) ui.notifications.warn("SceneForge AI: Patreon is not linked yet.");
+    return { ok: false, reason: "missing-token" };
+  }
+
+  const endpoint = `${backendBaseUrl}/api/subscription/status`;
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        await setSubscriptionAuthToken("");
+        await setSubscriptionAccountState({
+          linked: false,
+          active: false,
+          tier: "none",
+          monthKey: getCurrentUsageMonthKey(),
+          usageCount: 0,
+          usageLimit: 0,
+          resetAt: null
+        });
+      }
+      if (notify) ui.notifications.error("SceneForge AI: Failed to sync Patreon subscription status.");
+      return { ok: false, reason: `http-${response.status}`, payload };
+    }
+
+    const refreshedToken = extractSubscriptionTokenFromPayload(payload);
+    if (refreshedToken && refreshedToken !== token) {
+      await setSubscriptionAuthToken(refreshedToken);
+    }
+
+    const normalized = normalizeSubscriptionStatusPayload(payload);
+    const state = await setSubscriptionAccountState(normalized);
+    if (notify) {
+      const remaining = Math.max(0, state.usageLimit - state.usageCount);
+      ui.notifications.info(`SceneForge AI: Patreon synced. Tier: ${state.tier}. Remaining this month: ${remaining}.`);
+    }
+    return { ok: true, state, payload };
+  } catch (error) {
+    logImagePipelineError("subscription status sync failed", { endpoint }, error);
+    if (notify) ui.notifications.error("SceneForge AI: Could not sync Patreon status.");
+    return { ok: false, reason: "network-error", error };
+  }
+}
+
+async function maybeBootstrapPatreonSessionFromUrl() {
+  try {
+    const currentUrl = new URL(window.location.href);
+    const token = String(
+      currentUrl.searchParams.get("sceneforgeToken")
+      ?? currentUrl.searchParams.get("subscriptionToken")
+      ?? currentUrl.searchParams.get("token")
+      ?? ""
+    ).trim();
+    if (!token) return false;
+    await setSubscriptionAuthToken(token);
+    currentUrl.searchParams.delete("sceneforgeToken");
+    currentUrl.searchParams.delete("subscriptionToken");
+    currentUrl.searchParams.delete("token");
+    history.replaceState({}, document.title, currentUrl.toString());
+    ui.notifications.info("SceneForge AI: Patreon linked successfully.");
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function linkPatreonAccount() {
+  const linkUrl = buildPatreonLinkUrl();
+  if (!linkUrl) {
+    ui.notifications.error("SceneForge AI: Patreon Connect URL is not configured.");
+    return;
+  }
+
+  const popup = window.open(linkUrl, "sceneforge-patreon-link", "popup=yes,width=620,height=820");
+  if (!popup) {
+    ui.notifications.warn("SceneForge AI: Popup was blocked. Opening Patreon connect in a new tab.");
+    window.open(linkUrl, "_blank", "noopener");
+    return;
+  }
+
+  ui.notifications.info("SceneForge AI: Complete Patreon sign-in in the popup. Sync will run automatically after link.");
+
+  await new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+      if (!resolved) {
+        resolved = true;
+        resolve();
+      }
+    };
+
+    const onMessage = async (event) => {
+      const data = event?.data;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "sceneforge-patreon-linked") return;
+      const token = extractSubscriptionTokenFromPayload(data);
+      if (token) await setSubscriptionAuthToken(token);
+      cleanup();
+    };
+
+    const intervalId = window.setInterval(() => {
+      if (popup.closed) cleanup();
+    }, 500);
+    const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
+    window.addEventListener("message", onMessage);
+  });
+
+  await syncPatreonSubscriptionStatus({ notify: true });
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
@@ -1383,6 +1619,43 @@ Hooks.on("getDocumentContextOptions", (...args) => {
     ?? null;
   if (documentName && documentName !== "Scene") return;
   registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+Hooks.on("renderSettingsConfig", (_app, html) => {
+  const rootElement = getHtmlElement(html);
+  if (!rootElement) return;
+  if (rootElement.querySelector(".sceneforge-patreon-actions")) return;
+
+  const tokenInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_SUBSCRIPTION_AUTH_TOKEN}"]`);
+  const tokenGroup = tokenInput?.closest(".form-group");
+  if (!tokenGroup) return;
+
+  const state = getSubscriptionAccountState();
+  const remaining = Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
+  const statusText = state.linked
+    ? `Linked tier: ${state.tier || "unknown"} | Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} | Remaining: ${remaining}`
+    : "Patreon not linked.";
+
+  const actions = document.createElement("div");
+  actions.className = "form-group sceneforge-patreon-actions";
+  actions.innerHTML = `
+    <label>Patreon</label>
+    <div class="form-fields">
+      <button type="button" class="sceneforge-link-patreon"><i class="fas fa-link"></i> Link Patreon</button>
+      <button type="button" class="sceneforge-sync-patreon"><i class="fas fa-rotate"></i> Sync Subscription</button>
+    </div>
+    <p class="notes sceneforge-patreon-status">${foundry.utils.escapeHTML(statusText)}</p>
+  `;
+  tokenGroup.after(actions);
+
+  const linkButton = actions.querySelector(".sceneforge-link-patreon");
+  const syncButton = actions.querySelector(".sceneforge-sync-patreon");
+  linkButton?.addEventListener("click", async () => {
+    await linkPatreonAccount();
+  });
+  syncButton?.addEventListener("click", async () => {
+    await syncPatreonSubscriptionStatus({ notify: true });
+  });
 });
 
 /**
@@ -2559,6 +2832,31 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     };
   }
 
+  const subscriptionSync = await syncPatreonSubscriptionStatus({ notify: false });
+  const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
+  if (subscriptionSync.ok && subscriptionState.active === false) {
+    const manageUrl = getPatreonManageUrl();
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: manageUrl
+        ? `Patreon subscription is inactive. Manage subscription: ${manageUrl}`
+        : "Patreon subscription is inactive."
+    };
+  }
+  if (subscriptionSync.ok && subscriptionState.usageLimit > 0 && subscriptionState.usageCount >= subscriptionState.usageLimit) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `Monthly generation limit reached (${subscriptionState.usageCount}/${subscriptionState.usageLimit}). Resets at the next billing month.`
+    };
+  }
+  const requestToken = getSubscriptionAuthToken() || token;
+
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
   const requestPayload = {
@@ -2577,7 +2875,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${requestToken}`
       },
       body: JSON.stringify(requestPayload)
     });
