@@ -965,6 +965,7 @@ function normalizeSubscriptionStatusPayload(payload) {
 
 async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
   const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   if (!backendBaseUrl) {
     if (notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
     return { ok: false, reason: "missing-backend-url" };
@@ -1148,6 +1149,7 @@ function canUseGlobalImageDumpLibrary() {
 
 async function callGlobalImageDumpApi(path, { method = "POST", body = null } = {}) {
   const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   const token = getSubscriptionAuthToken();
   if (!backendBaseUrl || !token) return { ok: false, status: 0, payload: null };
 
@@ -2897,6 +2899,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const provider = "subscription";
   const costEstimate = { preview: "included with subscription", final: "included with subscription" };
   const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   const token = getSubscriptionAuthToken();
 
   if (!backendBaseUrl) {
