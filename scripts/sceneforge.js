@@ -611,11 +611,12 @@ function registerAssetPackSettings() {
     config: true,
     type: String,
     choices: {
+      "black-forest-labs": "Black Forest Labs (via Subscription Backend)",
       subscription: "Subscription Backend (Patreon)",
       bfl: "Black Forest Labs (FLUX)",
       openai: "OpenAI"
     },
-    default: "subscription"
+    default: "black-forest-labs"
   });
 
   game.settings.register(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE, {
@@ -634,7 +635,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: true,
     type: String,
-    default: "",
+    default: "https://sceneforge-backend.onrender.com",
     restricted: true
   });
 
@@ -644,7 +645,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: true,
     type: String,
-    default: "",
+    default: "https://sceneforge-backend.onrender.com/api/auth/patreon/connect",
     restricted: true
   });
 
@@ -654,7 +655,7 @@ function registerAssetPackSettings() {
     scope: "world",
     config: true,
     type: String,
-    default: "https://www.patreon.com/GambitsForge",
+    default: "https://www.patreon.com/membership",
     restricted: true
   });
 
@@ -809,7 +810,9 @@ function getEnabledAssetPackIds() {
 }
 
 function getAiImageProvider() {
-  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
+  const provider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
+  if (provider === "black-forest-labs") return "subscription";
+  return provider;
 }
 
 function getOpenAiApiKey() {
