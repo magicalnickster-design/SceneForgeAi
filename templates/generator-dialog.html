@@ -25,4 +25,29 @@
       Seed is reserved for future reproducibility controls.
     </p>
   </div>
+
+  <div class="form-group">
+    <label for="sf-map-scale">Map Size</label>
+    <select id="sf-map-scale" name="mapScale">
+      <option value="small">Small (~50m battle map)</option>
+      <option value="medium" selected>Medium (~250m local area)</option>
+      <option value="large">Large (~800m district scale)</option>
+      <option value="xlarge">Extra Large (~1 mile regional map)</option>
+    </select>
+    <p class="notes">
+      Sets approximate real-world map coverage in meters.
+    </p>
+  </div>
+
+  <div class="form-group">
+    <label for="sf-image-orientation">Image Orientation</label>
+    <select id="sf-image-orientation" name="imageOrientation">
+      <option value="landscape" selected>Landscape</option>
+      <option value="square">Square</option>
+      <option value="portrait">Portrait</option>
+    </select>
+    <p class="notes">
+      Most encounter maps work best in landscape or portrait formats.
+    </p>
+  </div>
 </form>

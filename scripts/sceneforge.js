@@ -331,7 +331,21 @@ async function getImagePixelDimensions(imagePath) {
 const SCENE_SIZES = {
   small: 30,
   medium: 50,
-  large: 70
+  large: 70,
+  xlarge: 90
+};
+
+const MAP_COVERAGE_METERS = {
+  small: 50,
+  medium: 250,
+  large: 800,
+  xlarge: 1609
+};
+
+const IMAGE_ORIENTATION_SPECS = {
+  landscape: { key: "landscape", size: "1536x1024", promptLine: "LANDSCAPE ORIENTATION" },
+  square: { key: "square", size: "1024x1024", promptLine: "SQUARE ORIENTATION" },
+  portrait: { key: "portrait", size: "1024x1536", promptLine: "PORTRAIT ORIENTATION" }
 };
 
 /**
@@ -777,6 +791,14 @@ function getSubscriptionAuthToken() {
 
 function getOpenAiMonthlyLimit() {
   return Math.max(0, Number(game.settings.get(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT) ?? 0));
+}
+
+function getMapCoverageMeters(mapScaleKey) {
+  return Number(MAP_COVERAGE_METERS[mapScaleKey] ?? MAP_COVERAGE_METERS.medium);
+}
+
+function getImageOrientationSpec(imageOrientationKey) {
+  return IMAGE_ORIENTATION_SPECS[imageOrientationKey] ?? IMAGE_ORIENTATION_SPECS.landscape;
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
@@ -1486,6 +1508,8 @@ function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
+  if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
+  if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
 }
 
 /**
@@ -1536,7 +1560,9 @@ async function handleGenerate(dialogHtml) {
 function buildGenerationConfigFromForm(form) {
   const generationMode = "ai-image-only";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
-  const sceneSizeKey = "medium";
+  const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
+  const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
+  const orientationSpec = getImageOrientationSpec(imageOrientation);
   const theme = "ai-map";
   const lightingMood = "dim";
   const useDetectedSettings = false;
@@ -1548,12 +1574,16 @@ function buildGenerationConfigFromForm(form) {
     return null;
   }
 
-  const compiledImagePrompt = compileInkarnatePrompt(prompt);
+  const compiledImagePrompt = compileInkarnatePrompt(prompt, { imageOrientation });
+  const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
 
   const generationData = {
     generationMode,
     prompt,
     sceneSizeKey,
+    imageOrientation,
+    imageSize: orientationSpec.size,
+    mapCoverageMeters,
     theme,
     lightingMood,
     detected: null,
@@ -1567,7 +1597,9 @@ function buildGenerationConfigFromForm(form) {
       compiledPrompt: compiledImagePrompt ?? "",
       imageStatus: "not-requested",
       imagePath: null,
-      costEstimate: null
+      costEstimate: null,
+      imageSize: orientationSpec.size,
+      imageOrientation
     },
     enabledAssetPacks: [],
     generationLayers: ["background-image"],
@@ -1578,7 +1610,9 @@ function buildGenerationConfigFromForm(form) {
   // Store the raw form values so Back/Edit can restore exactly what user entered.
   const formState = {
     prompt,
-    seed
+    seed,
+    mapScale: sceneSizeKey,
+    imageOrientation
   };
 
   return {
@@ -1656,6 +1690,9 @@ function buildGenerationPreviewData(config) {
     finalTheme: generationData.theme,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
+    imageOrientation: generationData.imageOrientation ?? "landscape",
+    imageSize: generationData.imageSize ?? "1536x1024",
+    mapCoverageMeters: generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey),
     lightingMood: generationData.lightingMood,
     appliedFeatures,
     enabledAssetPacks: generationData.enabledAssetPacks,
@@ -1943,9 +1980,18 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       // The old fixed 50x50 grid at 100px (5000x5000) stretched 1024px maps heavily.
       const imageDimensions = await getImagePixelDimensions(persistedBackgroundPath);
       if (imageDimensions?.width && imageDimensions?.height) {
+        const mapCoverageMeters = Number(resolvedGenerationData.mapCoverageMeters ?? getMapCoverageMeters(resolvedGenerationData.sceneSizeKey));
+        const gridSquaresAcross = Math.max(1, imageDimensions.width / GRID_SIZE_PX);
+        const metersPerGrid = Math.max(0.1, mapCoverageMeters / gridSquaresAcross);
         await scene.update({
           width: imageDimensions.width,
-          height: imageDimensions.height
+          height: imageDimensions.height,
+          grid: {
+            type: CONST.GRID_TYPES.SQUARE,
+            size: GRID_SIZE_PX,
+            distance: metersPerGrid,
+            units: "m"
+          }
         });
       }
 
@@ -2093,7 +2139,9 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   const imageResult = await generateAiMapImage(compiledPrompt, {
     mode: "preview",
     seed: generationData.seed,
-    sourcePrompt: generationData.prompt ?? ""
+    sourcePrompt: generationData.prompt ?? "",
+    imageSize: generationData.imageSize ?? getImageOrientationSpec(generationData.imageOrientation).size,
+    imageOrientation: generationData.imageOrientation ?? "landscape"
   });
   debugLog("AI imageResult", imageResult);
 
@@ -2512,7 +2560,9 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     seed: options.seed ?? null,
     plan: options.plan ?? null,
     layoutGraph: options.layoutGraph ?? null,
-    sourcePrompt: options.sourcePrompt ?? ""
+    sourcePrompt: options.sourcePrompt ?? "",
+    imageSize: options.imageSize ?? "1536x1024",
+    imageOrientation: options.imageOrientation ?? "landscape"
   };
   debugLog("Subscription generation request", { endpoint, requestPayload });
 
@@ -2656,7 +2706,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
     const requestPayload = {
       model: "gpt-image-1",
       prompt: compiledPrompt,
-      size: "1024x1024"
+      size: String(options.imageSize ?? "1536x1024")
     };
     debugLog("OpenAI request payload validated");
     debugLog("OpenAI request metadata", {
@@ -4186,10 +4236,11 @@ function formatThemeLabel(theme) {
  */
 function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration, useDetectedSettings) {
   const sceneSizeLabel = {
-    small: "Small (30x30)",
-    medium: "Medium (50x50)",
-    large: "Large (70x70)"
-  }[sceneSizeKey] ?? "Medium (50x50)";
+    small: "Small (~50m)",
+    medium: "Medium (~250m)",
+    large: "Large (~800m)",
+    xlarge: "Extra Large (~1 mile)"
+  }[sceneSizeKey] ?? "Medium (~250m)";
   const featureSummary = FEATURE_KEYS
     .filter((key) => detected?.features?.[key])
     .map((key) => formatFeatureLabel(key, detected?.features ?? {}));
@@ -4211,12 +4262,14 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 /**
  * Build the final image prompt by appending universal quality constraints.
  */
-function compileInkarnatePrompt(prompt) {
+function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
+  const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
     "90 DEGREE ORTHOGRAPHIC CAMERA",
+    orientationSpec.promptLine,
     "GRIDLESS",
     "HAND PAINTED INKARNATE STYLE",
     "CRISP LINEWORK",
@@ -4293,9 +4346,10 @@ function parsePromptForSceneSettings(prompt) {
  */
 function formatSceneSizeLabel(sceneSizeKey) {
   const labels = {
-    small: "Small (30x30)",
-    medium: "Medium (50x50)",
-    large: "Large (70x70)"
+    small: "Small (~50m)",
+    medium: "Medium (~250m)",
+    large: "Large (~800m)",
+    xlarge: "Extra Large (~1 mile)"
   };
   return labels[sceneSizeKey] ?? labels.medium;
 }
