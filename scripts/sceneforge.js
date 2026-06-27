@@ -4,7 +4,7 @@
  * This version keeps the original MVP behavior, then adds:
  *  - seeded deterministic generation
  *  - multiple themed layout variations
- *  - "Regenerate Layout" option in Scene Directory context menu
+ *  - Scene directory context menu actions for image edit, preset IO, and voting
  *  - per-document flags so regeneration only removes SceneForge content
  *
  * There is still NO real AI call here. Layouts are template-driven.
@@ -12,11 +12,20 @@
 
 const MODULE_ID = "sceneforge-ai";
 const GRID_SIZE_PX = 100;
+const DEFAULT_SCENE_BACKGROUND_COLOR = "#000000";
 const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
+const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
 const DEBUG = false;
+const GLOBAL_IMAGE_LIBRARY_ONLY = true;
 const TILE_FALLBACK_MODE = "skip-missing";
+// Temporary product-focus switch: disable all spawned tile/prop/pack assets.
+const ENABLE_ASSET_SPAWNING = false;
+// Test isolation switch: disable all SceneForge journals and notes.
+const ENABLE_JOURNALS_AND_NOTES = false;
+// Product decision: do not generate procedural walls/lights over AI maps.
+const ENABLE_SCENE_WALLS_AND_LIGHTS = false;
 
 /**
  * Lightweight debug logger so noisy logs can stay disabled by default.
@@ -32,11 +41,289 @@ function debugPayload(label, payload) {
   console.log(`${MODULE_ID} | ${label} payload:`, payload);
 }
 
+function logImagePipelineError(stage, details = {}, error = null) {
+  const payload = { ...details };
+  if (error) {
+    payload.error = error?.stack ?? error?.message ?? String(error);
+  }
+  console.error(`${MODULE_ID} | ${stage}`, payload);
+}
+
+function isHttpUrl(value) {
+  return typeof value === "string" && /^https?:\/\//i.test(value);
+}
+
+function isDataUrl(value) {
+  return typeof value === "string" && value.startsWith("data:");
+}
+
+function normalizePathForComparison(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (isDataUrl(raw)) return raw;
+
+  let normalized = raw;
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    normalized = `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    normalized = raw;
+  }
+
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch (_error) {
+    // Keep non-decoded value if malformed encoding is present.
+  }
+
+  normalized = normalized
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/^\//, "")
+    .replace(/[?#].*$/, "")
+    .trim();
+
+  return normalized;
+}
+
+function pathsLikelyMatch(leftPath, rightPath) {
+  const left = normalizePathForComparison(leftPath);
+  const right = normalizePathForComparison(rightPath);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+}
+
+function getFilePickerImpl() {
+  return foundry?.applications?.apps?.FilePicker?.implementation ?? globalThis.FilePicker ?? null;
+}
+
+function getRenderTemplateFn() {
+  return foundry?.applications?.handlebars?.renderTemplate ?? globalThis.renderTemplate;
+}
+
+async function ensureDataDirectory(path) {
+  const FilePickerImpl = getFilePickerImpl();
+  if (!path || typeof FilePickerImpl?.createDirectory !== "function") return;
+  const parts = String(path).split("/").filter((part) => part.length > 0);
+  let current = "";
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    try {
+      await FilePickerImpl.createDirectory("data", current);
+    } catch (_error) {
+      // Ignore if directory already exists or cannot be created.
+    }
+  }
+}
+
+function inferImageExtension(inputPath, mimeType = "") {
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
+  if (mime.includes("webp")) return "webp";
+  if (mime.includes("gif")) return "gif";
+  if (mime.includes("svg")) return "svg";
+  if (mime.includes("png")) return "png";
+
+  const path = String(inputPath ?? "");
+  const match = path.match(/\.([a-z0-9]{2,5})(?:$|\?)/i);
+  if (match) return match[1].toLowerCase();
+  return "png";
+}
+
+function dataUrlToBlob(dataUrl) {
+  const match = String(dataUrl ?? "").match(/^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i);
+  if (!match) throw new Error("Invalid data URL.");
+  const mimeType = match[1] || "image/png";
+  const isBase64 = Boolean(match[2]);
+  const dataSegment = match[3] || "";
+  if (isBase64) {
+    const binary = atob(dataSegment);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mimeType });
+  }
+  return new Blob([decodeURIComponent(dataSegment)], { type: mimeType });
+}
+
+async function persistSceneBackgroundPath(imagePath, options = {}) {
+  if (typeof imagePath !== "string" || imagePath.trim().length === 0) return imagePath;
+  const trimmedPath = imagePath.trim();
+  const FilePickerImpl = getFilePickerImpl();
+
+  // Already local/relative module path; no persistence needed.
+  if (!isHttpUrl(trimmedPath) && !isDataUrl(trimmedPath)) return trimmedPath;
+  if (typeof FilePickerImpl?.upload !== "function" || typeof File !== "function") return trimmedPath;
+
+  const { seed = "map", provider = "ai" } = options;
+  const targetDir = `${MODULE_ID}/generated-maps`;
+  await ensureDataDirectory(targetDir);
+
+  try {
+    let blob;
+    if (isDataUrl(trimmedPath)) {
+      blob = dataUrlToBlob(trimmedPath);
+    } else {
+      const response = await fetch(trimmedPath, { method: "GET", cache: "no-store" });
+      if (!response.ok) throw new Error(`Background fetch failed (${response.status}).`);
+      blob = await response.blob();
+    }
+
+    const extension = inferImageExtension(trimmedPath, blob.type);
+    const safeProvider = String(provider ?? "ai").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+    const safeSeed = String(seed ?? "map").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
+    const filename = `map-${safeProvider}-${safeSeed}-${Date.now()}.${extension}`;
+    const file = new File([blob], filename, { type: blob.type || "image/png" });
+    const uploadResult = await FilePickerImpl.upload("data", targetDir, file, {}, { notify: false });
+    const uploadedPath = uploadResult?.path ?? uploadResult?.files?.[0] ?? null;
+    if (uploadedPath) return uploadedPath;
+  } catch (error) {
+    debugLog("Background persistence skipped; using original path", error?.message ?? error);
+  }
+
+  return trimmedPath;
+}
+
 // Defensive constant fallbacks to avoid runtime failures across minor API differences.
-const WALL_NORMAL = CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
+const WALL_NORMAL = CONST.EDGE_SENSE_TYPES?.NORMAL ?? CONST.WALL_SENSE_TYPES?.NORMAL ?? 1;
 const WALL_DOOR_NONE = CONST.WALL_DOOR_TYPES?.NONE ?? 0;
 const WALL_DOOR_CLOSED = CONST.WALL_DOOR_STATES?.CLOSED ?? 0;
 const ASSET_PATH_AVAILABILITY_CACHE = new Map();
+
+function getSceneBackgroundSrc(scene) {
+  const objectData = scene?.toObject ? scene.toObject() : null;
+  return (
+    scene?.background?.src
+    ?? scene?._source?.background?.src
+    ?? objectData?.background?.src
+    ?? scene?.levels?.contents?.[0]?.background?.src
+    ?? scene?.levels?.contents?.[0]?.textures?.background?.src
+    ?? objectData?.levels?.[0]?.background?.src
+    ?? objectData?.levels?.[0]?.textures?.background?.src
+    ?? null
+  );
+}
+
+function getPrimarySceneLevel(scene) {
+  const fromLevelsCollection = scene?.levels?.contents?.[0] ?? null;
+  if (fromLevelsCollection) return fromLevelsCollection;
+  const fromEmbeddedCollection = scene?.collections?.levels?.contents?.[0] ?? null;
+  return fromEmbeddedCollection;
+}
+
+async function applyBackgroundToScene(scene, backgroundSrc) {
+  if (!scene || !backgroundSrc) {
+    return {
+      applied: false,
+      finalBackgroundSrc: null
+    };
+  }
+
+  // Attempt 1: legacy scene-level background path (v12/v13 compatibility).
+  await scene.update({
+    background: {
+      src: backgroundSrc
+    }
+  });
+  let finalBackgroundSrc = getSceneBackgroundSrc(scene);
+  if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
+    return {
+      applied: true,
+      finalBackgroundSrc
+    };
+  }
+
+  // Attempt 2: v14+ level background path.
+  const primaryLevel = getPrimarySceneLevel(scene);
+  if (primaryLevel?.update) {
+    await primaryLevel.update({
+      "background.src": backgroundSrc
+    });
+    finalBackgroundSrc = getSceneBackgroundSrc(scene);
+    if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
+      return {
+        applied: true,
+        finalBackgroundSrc
+      };
+    }
+  }
+
+  // Attempt 3: dotted path update for versions storing flattened keys.
+  await scene.update({
+    "background.src": backgroundSrc
+  });
+  finalBackgroundSrc = getSceneBackgroundSrc(scene);
+  if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
+    return {
+      applied: true,
+      finalBackgroundSrc
+    };
+  }
+
+  return {
+    applied: false,
+    finalBackgroundSrc
+  };
+}
+
+function getSceneBackgroundPath(scene) {
+  const src = String(getSceneBackgroundSrc(scene) ?? "").trim();
+  return src || null;
+}
+
+async function loadImageAsBlobOrFile(backgroundPath, options = {}) {
+  const src = String(backgroundPath ?? "").trim();
+  if (!src) throw new Error("Background image path is empty.");
+
+  const { filenamePrefix = "sceneforge-edit-reference" } = options;
+  let blob;
+  if (isDataUrl(src)) {
+    blob = dataUrlToBlob(src);
+  } else {
+    const response = await fetch(src, { method: "GET", cache: "no-store" });
+    if (!response.ok) throw new Error(`Failed loading reference image (${response.status}).`);
+    blob = await response.blob();
+  }
+
+  const extension = inferImageExtension(src, blob.type);
+  const filename = `${filenamePrefix}-${Date.now()}.${extension}`;
+  const file = (typeof File === "function")
+    ? new File([blob], filename, { type: blob.type || "image/png" })
+    : blob;
+
+  return {
+    blob,
+    file,
+    filename,
+    mimeType: blob.type || "image/png"
+  };
+}
+
+async function persistEditedSceneBackground(imageData, options = {}) {
+  return persistSceneBackgroundPath(imageData, {
+    seed: options.seed ?? "edit",
+    provider: options.provider ?? "edit"
+  });
+}
+
+async function getImagePixelDimensions(imagePath) {
+  const src = String(imagePath ?? "").trim();
+  if (!src || typeof Image !== "function") return null;
+
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const width = Number(image.naturalWidth || image.width || 0);
+      const height = Number(image.naturalHeight || image.height || 0);
+      if (width > 0 && height > 0) resolve({ width, height });
+      else resolve(null);
+    };
+    image.onerror = () => resolve(null);
+    image.src = src;
+  });
+}
 
 /**
  * Scene sizes are expressed in grid cells.
@@ -45,13 +332,35 @@ const ASSET_PATH_AVAILABILITY_CACHE = new Map();
 const SCENE_SIZES = {
   small: 30,
   medium: 50,
-  large: 70
+  large: 70,
+  xlarge: 90
+};
+
+const SCENE_GRID_PIXEL_SIZES = {
+  small: 120,
+  medium: 80,
+  large: 60,
+  xlarge: 40
+};
+
+const MAP_COVERAGE_METERS = {
+  small: 50,
+  medium: 250,
+  large: 800,
+  xlarge: 1609
+};
+
+const IMAGE_ORIENTATION_SPECS = {
+  landscape: { key: "landscape", size: "1536x1024", promptLine: "LANDSCAPE ORIENTATION" },
+  square: { key: "square", size: "1024x1024", promptLine: "SQUARE ORIENTATION" },
+  portrait: { key: "portrait", size: "1024x1536", promptLine: "PORTRAIT ORIENTATION" }
 };
 
 /**
  * Theme labels are reused for UI strings and note summaries.
  */
 const THEME_LABELS = {
+  "ai-map": "AI Map",
   tavern: "Tavern",
   cave: "Cave",
   "forest-ruins": "Forest Ruins",
@@ -140,9 +449,19 @@ const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
 const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
 const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
 const SETTING_OPENAI_API_KEY = "openAiApiKey";
+const SETTING_BFL_API_KEY = "bflApiKey";
 const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
+const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
+const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
+const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
+const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
+const SETTING_SUBSCRIPTION_ACCESS_CODE = "subscriptionAccessCode";
+const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
+const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
+const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
+const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 
 /**
  * Base registry ships with the core module.
@@ -226,6 +545,36 @@ Hooks.once("init", () => {
 });
 
 /**
+ * Cleanup for legacy SceneForge journal artifacts from older versions.
+ * These are no longer used in AI-image-only mode and can trigger startup
+ * validation issues in newer Foundry versions if old page payloads linger.
+ */
+async function cleanupLegacyGeneratedJournals() {
+  if (!game.user?.isGM) return;
+  const journals = Array.from(game.journal?.contents ?? []);
+  const generatedIds = journals
+    .filter((doc) => doc?.getFlag(MODULE_ID, FLAG_GENERATED_KEY) === true)
+    .map((doc) => doc.id)
+    .filter((id) => typeof id === "string" && id.length > 0);
+
+  if (generatedIds.length === 0) return;
+
+  try {
+    await JournalEntry.deleteDocuments(generatedIds);
+    debugLog(`Removed ${generatedIds.length} legacy SceneForge journal entries.`);
+    ui.notifications.info(`SceneForge AI: Removed ${generatedIds.length} legacy SceneForge journal entries.`);
+  } catch (error) {
+    console.error(`${MODULE_ID} | Failed to cleanup legacy journals`, error);
+  }
+}
+
+Hooks.once("ready", () => {
+  void cleanupLegacyGeneratedJournals();
+  void maybeBootstrapPatreonSessionFromUrl();
+  void syncPatreonSubscriptionStatus({ notify: false });
+});
+
+/**
  * Registers user-facing module settings for optional asset packs.
  * Location in Foundry: Game Settings -> Configure Settings -> Module Settings.
  */
@@ -259,24 +608,117 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
-    hint: "Select provider architecture target. Mock does not call external APIs.",
+    hint: "Select image provider for map generation.",
     scope: "world",
-    config: true,
+    config: false,
     type: String,
     choices: {
-      none: "None",
-      mock: "Mock Provider",
-      openai: "OpenAI placeholder",
-      stability: "Stability placeholder"
+      "black-forest-labs": "Black Forest Labs (via Subscription Backend)",
+      subscription: "Subscription Backend (Patreon)",
+      bfl: "Black Forest Labs (FLUX)",
+      openai: "OpenAI"
     },
-    default: "none"
+    default: "black-forest-labs"
+  });
+
+  game.settings.register(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE, {
+    name: "Global Library Only Mode",
+    hint: "SceneForge AI uses global library mode for production.",
+    scope: "world",
+    config: false,
+    type: Boolean,
+    default: true,
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, {
+    name: "Subscription Backend URL",
+    hint: "Your hosted API base URL (example: https://api.sceneforge.ai).",
+    scope: "world",
+    config: false,
+    type: String,
+    default: "https://sceneforge-backend.onrender.com",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_PATREON_CONNECT_URL, {
+    name: "Patreon Connect URL",
+    hint: "URL users open to link Patreon for active subscription access.",
+    scope: "world",
+    config: false,
+    type: String,
+    default: "https://sceneforge-backend.onrender.com/api/auth/patreon/connect",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_PATREON_MANAGE_URL, {
+    name: "Patreon Manage URL",
+    hint: "URL users open to manage subscription status.",
+    scope: "world",
+    config: false,
+    type: String,
+    default: "https://www.patreon.com/membership",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN, {
+    name: "Subscription Session Token",
+    hint: "Per-user token issued by your backend after Patreon linking.",
+    scope: "client",
+    config: false,
+    type: String,
+    default: "",
+    restricted: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE, {
+    name: "Subscription Access Code",
+    hint: "Temporary fallback access code while Patreon token support is being finalized.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+    restricted: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, {
+    name: "Subscription Account State",
+    scope: "client",
+    config: false,
+    type: Object,
+    default: {
+      linked: false,
+      active: false,
+      tier: "none",
+      isOwner: false,
+      unlimitedGenerations: false,
+      accountName: "",
+      accountEmail: "",
+      accountId: "",
+      monthKey: "",
+      usageCount: 0,
+      usageLimit: 0,
+      resetAt: null,
+      lastSyncAt: null
+    },
+    restricted: false
   });
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_API_KEY, {
     name: "OpenAI API Key",
-    hint: "Used only when AI Image Provider is OpenAI placeholder.",
+    hint: "Used when AI Image Provider is OpenAI.",
     scope: "world",
-    config: true,
+    config: false,
+    type: String,
+    default: "",
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_BFL_API_KEY, {
+    name: "BFL API Key",
+    hint: "Used when AI Image Provider is Black Forest Labs (FLUX).",
+    scope: "world",
+    config: false,
     type: String,
     default: "",
     restricted: true
@@ -284,9 +726,9 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT, {
     name: "OpenAI Monthly Generation Limit",
-    hint: "Hard cap on successful paid generations per month.",
+    hint: "Legacy hidden setting.",
     scope: "world",
-    config: true,
+    config: false,
     type: Number,
     default: 20,
     restricted: true
@@ -294,9 +736,9 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_CONFIRM_PAID_GENERATION, {
     name: "Confirm Before Paid Generation",
-    hint: "When enabled, a paid confirmation dialog is required before OpenAI generation.",
+    hint: "Legacy hidden setting.",
     scope: "world",
-    config: true,
+    config: false,
     type: Boolean,
     default: true,
     restricted: true
@@ -311,6 +753,19 @@ function registerAssetPackSettings() {
     default: {
       monthKey: "",
       count: 0
+    },
+    restricted: true
+  });
+
+  // Hidden image dump metadata used for prompt-matched reuse and voting.
+  game.settings.register(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY, {
+    name: "Image Dump Library",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {
+      version: 1,
+      entries: []
     },
     restricted: true
   });
@@ -367,15 +822,347 @@ function getEnabledAssetPackIds() {
 }
 
 function getAiImageProvider() {
-  return String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "none");
+  const provider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
+  if (provider === "black-forest-labs") return "subscription";
+  return provider;
 }
 
 function getOpenAiApiKey() {
   return String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim();
 }
 
+function getBflApiKey() {
+  return String(game.settings.get(MODULE_ID, SETTING_BFL_API_KEY) ?? "").trim();
+}
+
+function getSubscriptionBackendUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
+}
+
+function getPatreonConnectUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_PATREON_CONNECT_URL) ?? "").trim();
+}
+
+function getPatreonManageUrl() {
+  return String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
+}
+
+function getSubscriptionAuthToken() {
+  const token = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
+  if (token) return token;
+  const accessCode = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE) ?? "").trim();
+  if (accessCode === EARLY_ACCESS_SUBSCRIPTION_CODE) return accessCode;
+  return "";
+}
+
+function getSubscriptionAccountState() {
+  const fallback = {
+    linked: false,
+    active: false,
+    tier: "none",
+    isOwner: false,
+    unlimitedGenerations: false,
+    accountName: "",
+    accountEmail: "",
+    accountId: "",
+    monthKey: "",
+    usageCount: 0,
+    usageLimit: 0,
+    resetAt: null,
+    lastSyncAt: null
+  };
+  const value = game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE);
+  if (!value || typeof value !== "object") return fallback;
+  return { ...fallback, ...value };
+}
+
+async function setSubscriptionAuthToken(token) {
+  await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN, String(token ?? "").trim());
+}
+
+async function setSubscriptionAccountState(patch = {}) {
+  const nextState = {
+    ...getSubscriptionAccountState(),
+    ...(patch && typeof patch === "object" ? patch : {}),
+    lastSyncAt: new Date().toISOString()
+  };
+  await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, nextState);
+  return nextState;
+}
+
 function getOpenAiMonthlyLimit() {
   return Math.max(0, Number(game.settings.get(MODULE_ID, SETTING_OPENAI_MONTHLY_LIMIT) ?? 0));
+}
+
+function getMapCoverageMeters(mapScaleKey) {
+  return Number(MAP_COVERAGE_METERS[mapScaleKey] ?? MAP_COVERAGE_METERS.medium);
+}
+
+function getSceneGridPixelSize(sceneSizeKey) {
+  return Number(SCENE_GRID_PIXEL_SIZES[sceneSizeKey] ?? SCENE_GRID_PIXEL_SIZES.medium);
+}
+
+function getImageOrientationSpec(imageOrientationKey) {
+  return IMAGE_ORIENTATION_SPECS[imageOrientationKey] ?? IMAGE_ORIENTATION_SPECS.landscape;
+}
+
+function getPatreonLinkEndpoint() {
+  const connectUrl = getPatreonConnectUrl();
+  if (connectUrl) return connectUrl;
+  const backend = getSubscriptionBackendUrl();
+  if (!backend) return "";
+  return `${backend}/api/auth/patreon/connect`;
+}
+
+function buildPatreonLinkUrl() {
+  const endpoint = getPatreonLinkEndpoint();
+  if (!endpoint) return "";
+  try {
+    const url = new URL(endpoint, window.location.origin);
+    url.searchParams.set("source", MODULE_ID);
+    url.searchParams.set("returnUrl", window.location.href);
+    return url.toString();
+  } catch (_error) {
+    return endpoint;
+  }
+}
+
+function extractSubscriptionTokenFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const token = payload.subscriptionToken ?? payload.authToken ?? payload.token ?? payload.accessToken ?? "";
+  return String(token ?? "").trim();
+}
+
+function normalizeSubscriptionStatusPayload(payload) {
+  const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? payload?.monthlyLimit ?? 0);
+  const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? payload?.usedThisMonth ?? 0);
+  const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? getCurrentUsageMonthKey());
+  const tier = String(payload?.tier ?? payload?.subscription?.tier ?? payload?.plan ?? "none");
+  const accountName = String(
+    payload?.accountName
+    ?? payload?.patreon?.fullName
+    ?? payload?.patreon?.name
+    ?? payload?.member?.full_name
+    ?? payload?.member?.name
+    ?? payload?.user?.name
+    ?? ""
+  ).trim();
+  const accountEmail = String(
+    payload?.accountEmail
+    ?? payload?.patreon?.email
+    ?? payload?.member?.email
+    ?? payload?.user?.email
+    ?? ""
+  ).trim();
+  const accountId = String(
+    payload?.accountId
+    ?? payload?.patreon?.id
+    ?? payload?.member?.id
+    ?? payload?.user?.id
+    ?? ""
+  ).trim();
+  const ownerRaw =
+    payload?.isOwner
+    ?? payload?.owner
+    ?? payload?.account?.isOwner
+    ?? payload?.subscription?.isOwner
+    ?? false;
+  const isOwner = ownerRaw === true || String(ownerRaw).toLowerCase() === "true";
+  const unlimitedRaw =
+    payload?.unlimitedGenerations
+    ?? payload?.usage?.unlimited
+    ?? payload?.subscription?.unlimited
+    ?? false;
+  const hasUnlimitedFlag = unlimitedRaw === true || String(unlimitedRaw).toLowerCase() === "true";
+  const tierLower = tier.toLowerCase();
+  const unlimitedFromTier = tierLower.includes("owner") || tierLower.includes("admin") || tierLower.includes("creator");
+  const unlimitedGenerations = isOwner || hasUnlimitedFlag || unlimitedFromTier;
+  const activeRaw = payload?.active ?? payload?.subscription?.active ?? payload?.isActive ?? false;
+  const active = activeRaw === true || String(activeRaw).toLowerCase() === "true";
+  const resetAt = payload?.resetAt ?? payload?.usage?.resetAt ?? payload?.periodEnd ?? null;
+  const token = extractSubscriptionTokenFromPayload(payload);
+
+  return {
+    linked: Boolean(token || getSubscriptionAuthToken()),
+    active,
+    tier,
+    isOwner,
+    unlimitedGenerations,
+    accountName,
+    accountEmail,
+    accountId,
+    monthKey,
+    usageCount: Number.isFinite(usageCount) ? Math.max(0, usageCount) : 0,
+    usageLimit: Number.isFinite(usageLimit) ? Math.max(0, usageLimit) : 0,
+    resetAt
+  };
+}
+
+async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
+  if (!backendBaseUrl) {
+    if (notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
+    return { ok: false, reason: "missing-backend-url" };
+  }
+
+  const token = getSubscriptionAuthToken();
+  if (!token) {
+    await setSubscriptionAccountState({
+      linked: false,
+      active: false,
+      tier: "none",
+      isOwner: false,
+      unlimitedGenerations: false,
+      accountName: "",
+      accountEmail: "",
+      accountId: "",
+      monthKey: getCurrentUsageMonthKey(),
+      usageCount: 0,
+      usageLimit: 0,
+      resetAt: null
+    });
+    if (notify) ui.notifications.warn("SceneForge AI: Patreon is not linked yet.");
+    return { ok: false, reason: "missing-token" };
+  }
+
+  const endpoint = `${backendBaseUrl}/api/subscription/status`;
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        await setSubscriptionAuthToken("");
+        await setSubscriptionAccountState({
+          linked: false,
+          active: false,
+          tier: "none",
+          isOwner: false,
+          unlimitedGenerations: false,
+          accountName: "",
+          accountEmail: "",
+          accountId: "",
+          monthKey: getCurrentUsageMonthKey(),
+          usageCount: 0,
+          usageLimit: 0,
+          resetAt: null
+        });
+      }
+      if (notify) ui.notifications.error("SceneForge AI: Failed to sync Patreon subscription status.");
+      return { ok: false, reason: `http-${response.status}`, payload };
+    }
+
+    const refreshedToken = extractSubscriptionTokenFromPayload(payload);
+    if (refreshedToken && refreshedToken !== token) {
+      await setSubscriptionAuthToken(refreshedToken);
+    }
+
+    const normalized = normalizeSubscriptionStatusPayload(payload);
+    const state = await setSubscriptionAccountState(normalized);
+    if (notify) {
+      const remaining = Math.max(0, state.usageLimit - state.usageCount);
+      const remainingLabel = state.unlimitedGenerations ? "Unlimited" : String(remaining);
+      ui.notifications.info(`SceneForge AI: Patreon synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
+    }
+    return { ok: true, state, payload };
+  } catch (error) {
+    logImagePipelineError("subscription status sync failed", { endpoint }, error);
+    if (notify) ui.notifications.error("SceneForge AI: Could not sync Patreon status.");
+    return { ok: false, reason: "network-error", error };
+  }
+}
+
+async function maybeBootstrapPatreonSessionFromUrl() {
+  try {
+    const currentUrl = new URL(window.location.href);
+    const token = String(
+      currentUrl.searchParams.get("sceneforgeToken")
+      ?? currentUrl.searchParams.get("subscriptionToken")
+      ?? currentUrl.searchParams.get("token")
+      ?? ""
+    ).trim();
+    if (!token) return false;
+    await setSubscriptionAuthToken(token);
+    currentUrl.searchParams.delete("sceneforgeToken");
+    currentUrl.searchParams.delete("subscriptionToken");
+    currentUrl.searchParams.delete("token");
+    history.replaceState({}, document.title, currentUrl.toString());
+    ui.notifications.info("SceneForge AI: Patreon linked successfully.");
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function linkPatreonAccount() {
+  const linkUrl = buildPatreonLinkUrl();
+  if (!linkUrl) {
+    ui.notifications.error("SceneForge AI: Patreon Connect URL is not configured.");
+    return;
+  }
+
+  const popup = window.open(linkUrl, "sceneforge-patreon-link", "popup=yes,width=620,height=820");
+  if (!popup) {
+    ui.notifications.warn("SceneForge AI: Popup was blocked. Opening Patreon connect in a new tab.");
+    window.open(linkUrl, "_blank", "noopener");
+    return;
+  }
+
+  ui.notifications.info("SceneForge AI: Complete Patreon sign-in in the popup. Sync will run automatically after link.");
+
+  await new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+      if (!resolved) {
+        resolved = true;
+        resolve();
+      }
+    };
+
+    const onMessage = async (event) => {
+      const data = event?.data;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "sceneforge-patreon-linked") return;
+      const token = extractSubscriptionTokenFromPayload(data);
+      if (token) await setSubscriptionAuthToken(token);
+      cleanup();
+    };
+
+    const intervalId = window.setInterval(() => {
+      if (popup.closed) cleanup();
+    }, 500);
+    const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
+    window.addEventListener("message", onMessage);
+  });
+
+  await syncPatreonSubscriptionStatus({ notify: true });
+}
+
+function formatLinkedAccountLabel(state) {
+  const name = String(state?.accountName ?? "").trim();
+  const email = String(state?.accountEmail ?? "").trim();
+  const accountId = String(state?.accountId ?? "").trim();
+  if (name && email) return `${name} (${email})`;
+  if (name) return name;
+  if (email) return email;
+  if (accountId) return `Patreon ID ${accountId}`;
+  return "Unknown Patreon account";
+}
+
+function isGlobalLibraryOnlyModeEnabled() {
+  if (getAiImageProvider() !== "subscription") return false;
+  const configured = game.settings.get(MODULE_ID, SETTING_GLOBAL_LIBRARY_ONLY_MODE);
+  if (typeof configured === "boolean") return configured;
+  return true;
 }
 
 function isPaidGenerationConfirmationEnabled() {
@@ -386,6 +1173,277 @@ function getCurrentUsageMonthKey() {
   const now = new Date();
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   return `${now.getUTCFullYear()}-${month}`;
+}
+
+function normalizePromptForReuse(prompt) {
+  return String(prompt ?? "").trim();
+}
+
+function canUseGlobalImageDumpLibrary() {
+  if (!isGlobalLibraryOnlyModeEnabled()) return false;
+  if (getAiImageProvider() !== "subscription") return false;
+  return Boolean(getSubscriptionBackendUrl() && getSubscriptionAuthToken());
+}
+
+async function callGlobalImageDumpApi(path, { method = "POST", body = null } = {}) {
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
+  const token = getSubscriptionAuthToken();
+  if (!backendBaseUrl || !token) return { ok: false, status: 0, payload: null };
+
+  const endpoint = `${backendBaseUrl}${path}`;
+  try {
+    const response = await fetch(endpoint, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: body ? JSON.stringify(body) : null
+    });
+    const payload = await response.json().catch(() => ({}));
+    return { ok: response.ok, status: response.status, payload };
+  } catch (error) {
+    logImagePipelineError("global image dump api exception", { endpoint, method }, error);
+    return { ok: false, status: 0, payload: null };
+  }
+}
+
+function buildSceneNameFromPrompt(prompt, options = {}) {
+  const { prefix = "SceneForge", fallback = "Map" } = options;
+  const words = String(prompt ?? "")
+    .trim()
+    .replace(/[^a-z0-9\s-]/gi, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 0)
+    .slice(0, 5);
+  const label = words.length > 0 ? words.join(" ") : fallback;
+  const title = label.replace(/\b\w/g, (c) => c.toUpperCase());
+  return `${prefix} - ${title}`;
+}
+
+function getImageDumpLibrary() {
+  const raw = game.settings.get(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY);
+  if (!raw || typeof raw !== "object") {
+    return { version: 1, entries: [] };
+  }
+  const entries = Array.isArray(raw.entries) ? raw.entries : [];
+  return { version: 1, entries };
+}
+
+async function setImageDumpLibrary(library) {
+  await game.settings.set(MODULE_ID, SETTING_IMAGE_DUMP_LIBRARY, {
+    version: 1,
+    entries: Array.isArray(library?.entries) ? library.entries : []
+  });
+}
+
+function getPlanCategoryKey(plan) {
+  const biome = String(plan?.biome ?? "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const theme = String(plan?.theme ?? "general").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  return `${biome}/${theme}`;
+}
+
+function scoreImageDumpEntry(entry) {
+  return Number(entry?.likes ?? 0) - Number(entry?.dislikes ?? 0);
+}
+
+async function findReusableImageEntryForPrompt(prompt) {
+  const promptExact = normalizePromptForReuse(prompt);
+  if (!promptExact) return null;
+
+  if (!canUseGlobalImageDumpLibrary()) {
+    throw new Error("Global image library is required. Configure Subscription provider, backend URL, and auth token.");
+  }
+
+  const response = await callGlobalImageDumpApi("/api/maps/reuse/exact", {
+    method: "POST",
+    body: {
+      promptExact,
+      requirePositiveVote: true
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`Global reuse lookup failed (${response.status || "network"}).`);
+  }
+  const match = response.payload?.entry ?? response.payload?.match ?? null;
+  if (!match?.imagePath) return null;
+  return {
+    id: match.id ?? null,
+    promptExact,
+    imagePath: String(match.imagePath),
+    provider: "subscription",
+    source: "global"
+  };
+}
+
+async function upsertImageDumpEntry(entry) {
+  const library = getImageDumpLibrary();
+  const entries = [...library.entries];
+  const id = entry?.id || foundry.utils.randomID();
+  const normalizedEntry = {
+    id,
+    promptExact: normalizePromptForReuse(entry?.promptExact ?? ""),
+    imagePath: String(entry?.imagePath ?? "").trim(),
+    categoryKey: String(entry?.categoryKey ?? "unknown/general"),
+    provider: String(entry?.provider ?? "unknown"),
+    seed: String(entry?.seed ?? ""),
+    sceneId: entry?.sceneId ?? null,
+    compiledPrompt: String(entry?.compiledPrompt ?? ""),
+    likes: Number(entry?.likes ?? 0),
+    dislikes: Number(entry?.dislikes ?? 0),
+    votes: entry?.votes && typeof entry.votes === "object" ? entry.votes : {},
+    createdAt: Number(entry?.createdAt ?? Date.now()),
+    updatedAt: Number(entry?.updatedAt ?? Date.now()),
+    lastUsedAt: Number(entry?.lastUsedAt ?? Date.now()),
+    usageCount: Number(entry?.usageCount ?? 0)
+  };
+
+  const existingIndex = entries.findIndex((item) => item?.id === id);
+  if (existingIndex >= 0) entries[existingIndex] = normalizedEntry;
+  else entries.push(normalizedEntry);
+
+  await setImageDumpLibrary({ version: 1, entries });
+  return normalizedEntry;
+}
+
+async function recordGeneratedImageDumpEntry({ generationData, imageGenerationMetadata, imagePath, scene }) {
+  const promptExact = normalizePromptForReuse(generationData?.prompt ?? "");
+  if (!promptExact || !imagePath || !scene) return null;
+
+  if (!canUseGlobalImageDumpLibrary()) {
+    logImagePipelineError("global image upsert skipped (global library unavailable)", {
+      promptExact,
+      sceneId: scene?.id ?? null
+    });
+    return null;
+  }
+
+  const response = await callGlobalImageDumpApi("/api/maps/library/upsert", {
+    method: "POST",
+    body: {
+      promptExact,
+      imagePath,
+      categoryKey: getPlanCategoryKey(generationData?.aiPlan ?? null),
+      provider: imageGenerationMetadata?.provider ?? "unknown",
+      seed: generationData?.seed ?? "",
+      sceneId: scene.id,
+      compiledPrompt: generationData?.compiledImagePrompt ?? ""
+    }
+  });
+  const globalEntryId = response.payload?.entry?.id ?? response.payload?.id ?? null;
+  if (!response.ok || !globalEntryId) {
+    logImagePipelineError("global image upsert failed", {
+      promptExact,
+      sceneId: scene?.id ?? null,
+      status: response.status || "network"
+    });
+    return null;
+  }
+  await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, globalEntryId);
+  return { id: globalEntryId, promptExact, imagePath };
+}
+
+async function markImageDumpEntryUsed(entryId, scene) {
+  if (!entryId) return;
+  if (!canUseGlobalImageDumpLibrary()) {
+    logImagePipelineError("global usage mark skipped (global library unavailable)", { entryId });
+    return;
+  }
+  const response = await callGlobalImageDumpApi("/api/maps/library/mark-used", {
+    method: "POST",
+    body: {
+      entryId,
+      sceneId: scene?.id ?? null
+    }
+  });
+  if (!response.ok) {
+    logImagePipelineError("global usage update failed", {
+      entryId,
+      status: response.status || "network"
+    });
+    return;
+  }
+  if (scene) {
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID, entryId);
+  }
+}
+
+async function voteOnSceneMap(scene, voteValue) {
+  const entryId = scene?.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
+  if (!entryId) {
+    ui.notifications.warn("SceneForge AI: No image dump entry found for this scene.");
+    return;
+  }
+  const userId = game.user?.id;
+  if (!userId) return;
+
+  if (!canUseGlobalImageDumpLibrary()) {
+    ui.notifications.error("SceneForge AI: Global vote service is required.");
+    return;
+  }
+
+  const response = await callGlobalImageDumpApi("/api/maps/library/vote", {
+    method: "POST",
+    body: {
+      entryId,
+      vote: Number(voteValue)
+    }
+  });
+  if (response.ok) {
+    ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
+    return;
+  }
+
+  ui.notifications.error(`SceneForge AI: Global vote failed (${response.status || "network"}).`);
+}
+
+async function promptForGeneratedSceneVote(scene) {
+  if (!scene) return;
+  await new Promise((resolve) => {
+    const dialog = new Dialog({
+      title: "SceneForge AI: Keep this map for reuse?",
+      content: "<p>Do you like this generated map?</p>",
+      buttons: {
+        yes: {
+          icon: '<i class="fas fa-thumbs-up"></i>',
+          label: "Yes, keep for reuse",
+          callback: async () => {
+            await voteOnSceneMap(scene, 1);
+            resolve();
+          }
+        },
+        no: {
+          icon: '<i class="fas fa-thumbs-down"></i>',
+          label: "No, do not reuse",
+          callback: async () => {
+            await voteOnSceneMap(scene, -1);
+            resolve();
+          }
+        }
+      },
+      default: "yes",
+      close: () => resolve()
+    });
+    dialog.render(true);
+  });
+}
+
+function getCategoryReferenceSummary(plan) {
+  if (canUseGlobalImageDumpLibrary()) {
+    return "Global reference library enabled.";
+  }
+  const categoryKey = getPlanCategoryKey(plan);
+  const library = getImageDumpLibrary();
+  const categoryEntries = library.entries.filter((entry) =>
+    entry?.categoryKey === categoryKey
+    && Number(entry?.likes ?? 0) >= Number(entry?.dislikes ?? 0)
+  );
+  if (categoryEntries.length === 0) {
+    return "No prior rated category references yet.";
+  }
+  const highlyRated = categoryEntries.filter((entry) => Number(entry.likes ?? 0) > Number(entry.dislikes ?? 0));
+  return `Rated references available for ${categoryKey}: ${categoryEntries.length} (highly rated: ${highlyRated.length}).`;
 }
 
 /**
@@ -425,6 +1483,10 @@ async function safeSceneCreate(payload, contextLabel = "Scene.create") {
 }
 
 async function safeJournalEntryCreate(payload, contextLabel = "JournalEntry.create") {
+  if (!ENABLE_JOURNALS_AND_NOTES) {
+    debugLog(`${contextLabel} skipped (journals disabled).`);
+    return null;
+  }
   try {
     debugPayload(contextLabel, payload);
     const sanitized = sanitizeDocumentPayload("JournalEntry", payload);
@@ -438,6 +1500,10 @@ async function safeJournalEntryCreate(payload, contextLabel = "JournalEntry.crea
 }
 
 async function safeEmbeddedCreate(scene, documentName, payloadArray, contextLabel) {
+  if (!ENABLE_JOURNALS_AND_NOTES && documentName === "Note") {
+    debugLog(`${contextLabel} skipped (notes disabled).`);
+    return [];
+  }
   try {
     debugPayload(contextLabel, payloadArray);
     const sanitized = sanitizeDocumentPayload(documentName, payloadArray);
@@ -522,7 +1588,7 @@ function getHtmlElement(html) {
 }
 
 /**
- * Add the "Generate Scene" button to the Scene Directory footer.
+ * Add the "Generate Map" button to the Scene Directory footer.
  */
 Hooks.on("renderSceneDirectory", (app, html) => {
   if (!game.user?.isGM) return;
@@ -538,7 +1604,7 @@ Hooks.on("renderSceneDirectory", (app, html) => {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "sceneforge-generate-btn";
-  button.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Generate Scene';
+  button.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Generate Map';
   button.addEventListener("click", async () => {
     await openGeneratorDialog();
   });
@@ -550,21 +1616,22 @@ Hooks.on("renderSceneDirectory", (app, html) => {
 
 /**
  * Add a right-click context menu item to each scene in Scene Directory.
- * This is where we expose "Regenerate Layout".
  */
-Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
+function registerSceneDirectoryEntryContextOptions(entryOptions) {
+  if (!Array.isArray(entryOptions)) return;
+  if (entryOptions.some((option) => option?.name === "Edit Image (SceneForge AI)")) return;
+
   entryOptions.push({
-    name: "SceneForge: Regenerate Layout",
-    icon: '<i class="fas fa-arrows-rotate"></i>',
-    condition: (li) => {
-      if (!game.user?.isGM) return false;
-      const scene = getSceneFromDirectoryLi(li);
-      return Boolean(scene?.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
-    },
+    name: "Edit Image (SceneForge AI)",
+    icon: '<i class="fas fa-image"></i>',
+    condition: () => game.user?.isGM === true,
     callback: async (li) => {
       const scene = getSceneFromDirectoryLi(li);
-      if (!scene) return;
-      await regenerateSceneFromFlags(scene);
+      if (!scene) {
+        ui.notifications.error("SceneForge AI: Could not resolve selected scene.");
+        return;
+      }
+      await openSceneImageEditDialog(scene);
     }
   });
 
@@ -591,6 +1658,127 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
       await promptImportPresetFile();
     }
   });
+
+  entryOptions.push({
+    name: "SceneForge: Rate Map",
+    icon: '<i class="fas fa-thumbs-up"></i>',
+    condition: (li) => {
+      const scene = getSceneFromDirectoryLi(li);
+      return Boolean(scene?.getFlag(MODULE_ID, FLAG_GENERATION_KEY));
+    },
+    callback: async (li) => {
+      const scene = getSceneFromDirectoryLi(li);
+      if (!scene) return;
+      const dialog = new Dialog({
+        title: "SceneForge: Rate Generated Map",
+        content: "<p>How do you rate this generated map for future reuse?</p>",
+        buttons: {
+          like: {
+            icon: '<i class="fas fa-thumbs-up"></i>',
+            label: "Like",
+            callback: async () => voteOnSceneMap(scene, 1)
+          },
+          dislike: {
+            icon: '<i class="fas fa-thumbs-down"></i>',
+            label: "Dislike",
+            callback: async () => voteOnSceneMap(scene, -1)
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: "Cancel"
+          }
+        },
+        default: "cancel"
+      });
+      dialog.render(true);
+    }
+  });
+}
+
+Hooks.on("getSceneDirectoryEntryContext", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+// v13+ compatibility fallback for generic document directory context hook.
+Hooks.on("getDocumentDirectoryEntryContext", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  const directoryLike = args.find((arg) => arg && typeof arg === "object" && !Array.isArray(arg));
+  const documentName =
+    directoryLike?.documentName
+    ?? directoryLike?.constructor?.documentName
+    ?? directoryLike?.collection?.documentName
+    ?? null;
+  if (documentName && documentName !== "Scene") return;
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+// v13+ ApplicationV2 document context hook for scenes.
+Hooks.on("getSceneContextOptions", (...args) => {
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+// Generic document hook in case specific scene hook is unavailable.
+Hooks.on("getDocumentContextOptions", (...args) => {
+  const applicationLike = args.find((arg) => arg && typeof arg === "object" && !Array.isArray(arg));
+  const entryOptions = args.find((arg) => Array.isArray(arg));
+  const documentName =
+    applicationLike?.documentName
+    ?? applicationLike?.collection?.documentName
+    ?? applicationLike?.constructor?.documentName
+    ?? null;
+  if (documentName && documentName !== "Scene") return;
+  registerSceneDirectoryEntryContextOptions(entryOptions);
+});
+
+Hooks.on("renderSettingsConfig", (_app, html) => {
+  const rootElement = getHtmlElement(html);
+  if (!rootElement) return;
+  if (rootElement.querySelector(".sceneforge-patreon-actions")) return;
+
+  const accessCodeInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_SUBSCRIPTION_ACCESS_CODE}"]`);
+  const anchorGroup = accessCodeInput?.closest(".form-group");
+  if (!anchorGroup) return;
+
+  const state = getSubscriptionAccountState();
+  const remaining = state.unlimitedGenerations
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
+  const linkedAccount = formatLinkedAccountLabel(state);
+  const linkedLine = state.linked
+    ? `Linked as: ${linkedAccount}`
+    : "Linked as: Not linked";
+  const ownerSuffix = state.isOwner ? " (Owner)" : "";
+  const tierLine = `Tier: ${state.linked ? (state.tier || "unknown") : "none"}${ownerSuffix}`;
+  const usageLine = state.unlimitedGenerations
+    ? `Monthly usage: ${state.usageCount ?? 0} / Unlimited`
+    : `Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} (Remaining: ${remaining})`;
+
+  const actions = document.createElement("div");
+  actions.className = "form-group sceneforge-patreon-actions";
+  actions.innerHTML = `
+    <label>Patreon</label>
+    <div class="form-fields">
+      <button type="button" class="sceneforge-link-patreon"><i class="fas fa-link"></i> Link Patreon</button>
+      <button type="button" class="sceneforge-sync-patreon"><i class="fas fa-rotate"></i> Sync Subscription</button>
+    </div>
+    <div class="notes sceneforge-patreon-status" style="margin-top:6px; line-height:1.4;">
+      <div><strong>${foundry.utils.escapeHTML(linkedLine)}</strong></div>
+      <div>${foundry.utils.escapeHTML(tierLine)}</div>
+      <div>${foundry.utils.escapeHTML(usageLine)}</div>
+    </div>
+  `;
+  anchorGroup.after(actions);
+
+  const linkButton = actions.querySelector(".sceneforge-link-patreon");
+  const syncButton = actions.querySelector(".sceneforge-sync-patreon");
+  linkButton?.addEventListener("click", async () => {
+    await linkPatreonAccount();
+  });
+  syncButton?.addEventListener("click", async () => {
+    await syncPatreonSubscriptionStatus({ notify: true });
+  });
 });
 
 /**
@@ -598,32 +1786,85 @@ Hooks.on("getSceneDirectoryEntryContext", (html, entryOptions) => {
  * The dataset key can vary by Foundry version, so we check multiple keys.
  */
 function getSceneFromDirectoryLi(li) {
-  const jq = li?.jquery ? li : $(li);
-  const sceneId =
-    jq?.data?.("documentId")
-    ?? jq?.data?.("entryId")
-    ?? li?.[0]?.dataset?.documentId
-    ?? li?.[0]?.dataset?.entryId
-    ?? li?.dataset?.documentId
-    ?? li?.dataset?.entryId;
+  const element =
+    (li instanceof HTMLElement ? li : null)
+    ?? (li?.[0] instanceof HTMLElement ? li[0] : null)
+    ?? null;
+  const nearestWithDataset = element?.closest?.("[data-document-id], [data-entry-id], [data-scene-id], [data-uuid], li");
 
-  if (!sceneId) return null;
-  return game.scenes.get(sceneId) ?? null;
+  const readDataValue = (key) => {
+    const datasetKey = key.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
+    const fromElement = element?.dataset?.[datasetKey];
+    if (fromElement) return fromElement;
+    const fromNearest = nearestWithDataset?.dataset?.[datasetKey];
+    if (fromNearest) return fromNearest;
+    if (element?.getAttribute || nearestWithDataset?.getAttribute) {
+      const attrValue =
+        element?.getAttribute?.(`data-${key}`)
+        ?? nearestWithDataset?.getAttribute?.(`data-${key}`)
+        ?? null;
+      if (attrValue) return attrValue;
+    }
+    if (typeof li?.data === "function") {
+      const value = li.data(datasetKey) ?? li.data(key);
+      if (value) return value;
+    }
+    return null;
+  };
+
+  const sceneId =
+    readDataValue("document-id")
+    ?? readDataValue("documentId")
+    ?? readDataValue("entry-id")
+    ?? readDataValue("entryId")
+    ?? readDataValue("scene-id")
+    ?? readDataValue("sceneId")
+    ?? readDataValue("id")
+    ?? li?.id
+    ?? li?.documentId
+    ?? li?.dataset?.documentId
+    ?? li?.dataset?.entryId
+    ?? li?.dataset?.sceneId
+    ?? null;
+
+  if (sceneId && game.scenes?.has(sceneId)) {
+    return game.scenes.get(sceneId) ?? null;
+  }
+
+  const sceneUuid =
+    readDataValue("uuid")
+    ?? readDataValue("document-uuid")
+    ?? readDataValue("documentUuid")
+    ?? li?.dataset?.uuid
+    ?? li?.dataset?.documentUuid
+    ?? li?.uuid
+    ?? null;
+  if (sceneUuid && typeof fromUuidSync === "function") {
+    const doc = fromUuidSync(sceneUuid);
+    if (doc?.documentName === "Scene") return doc;
+  }
+
+  return null;
 }
 
 /**
  * Open the generator dialog from our template.
  */
 async function openGeneratorDialog(initialState = null) {
-  const content = await renderTemplate(`modules/${MODULE_ID}/templates/generator-dialog.html`);
+  const renderTemplateCompat = getRenderTemplateFn();
+  if (typeof renderTemplateCompat !== "function") {
+    ui.notifications.error("SceneForge AI: Template renderer unavailable in this Foundry version.");
+    return;
+  }
+  const content = await renderTemplateCompat(`modules/${MODULE_ID}/templates/generator-dialog.html`);
 
   const dialog = new Dialog({
-    title: "SceneForge AI - Generate Scene",
+    title: "SceneForge AI - Generate Map",
     content,
     buttons: {
       generate: {
         icon: '<i class="fas fa-wand-magic-sparkles"></i>',
-        label: "Generate",
+        label: "Generate Map",
         callback: async (dialogHtml) => {
           await handleGenerate(dialogHtml);
         }
@@ -643,35 +1884,13 @@ async function openGeneratorDialog(initialState = null) {
 }
 
 /**
- * Wire click behavior for "Auto Detect From Prompt".
- * The detected payload is cached in the form's jQuery data so Generate can reuse it.
+ * Wire the simplified prompt-only generator dialog.
  */
 function wireAutoDetectUi(dialogHtml, initialState = null) {
   const form = dialogHtml.find(".sceneforge-form");
-  const autoDetectButton = dialogHtml.find(".sceneforge-autodetect-btn");
-  const useDetectedToggle = form.find('[name="useDetectedSettings"]');
 
-  // If we returned from preview mode via Back/Edit, restore previous values.
+  // Restore previous values if the dialog is reopened.
   applyGeneratorFormState(form, initialState);
-
-  // Run once on initial render so the preview is immediately useful.
-  refreshDetectionPreview(dialogHtml);
-
-  autoDetectButton.on("click", () => {
-    const detected = refreshDetectionPreview(dialogHtml);
-    if (!detected) {
-      ui.notifications.warn("SceneForge AI: Enter a prompt before auto-detecting.");
-    }
-  });
-
-  // If the user toggles ON after already detecting, sync manual controls again.
-  useDetectedToggle.on("change", () => {
-    const detected = form.data("sceneforgeDetected");
-    if (!detected) return;
-    if (useDetectedToggle.is(":checked")) {
-      applyDetectedSettingsToControls(form, detected);
-    }
-  });
 }
 
 /**
@@ -679,13 +1898,10 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
  */
 function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
-  if (typeof state.generationMode === "string") form.find('[name="generationMode"]').val(state.generationMode);
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
-  if (typeof state.sceneSizeKey === "string") form.find('[name="sceneSize"]').val(state.sceneSizeKey);
-  if (typeof state.theme === "string") form.find('[name="theme"]').val(state.theme);
-  if (typeof state.lightingMood === "string") form.find('[name="lightingMood"]').val(state.lightingMood);
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
-  if (typeof state.useDetectedSettings === "boolean") form.find('[name="useDetectedSettings"]').prop("checked", state.useDetectedSettings);
+  if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
+  if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
 }
 
 /**
@@ -704,7 +1920,9 @@ function refreshDetectionPreview(dialogHtml) {
     applyDetectedSettingsToControls(form, detected);
   }
 
-  renderDetectedResults(dialogHtml, detected);
+  if (dialogHtml.find(".sceneforge-detected-results").length > 0) {
+    renderDetectedResults(dialogHtml, detected);
+  }
   return detected;
 }
 
@@ -725,20 +1943,21 @@ async function handleGenerate(dialogHtml) {
   const generationConfig = buildGenerationConfigFromForm(form);
   if (!generationConfig) return;
 
-  const previewData = buildGenerationPreviewData(generationConfig);
-  await openGenerationPreviewDialog(generationConfig, previewData);
+  await createMockAiSceneFromGenerationData(generationConfig.generationData, generationConfig.seedWasAutoGenerated);
 }
 
 /**
  * Build normalized generation config from generator dialog inputs.
  */
 function buildGenerationConfigFromForm(form) {
-  const generationMode = String(form.find('[name="generationMode"]').val() ?? "procedural");
+  const generationMode = "ai-image-only";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
-  let sceneSizeKey = String(form.find('[name="sceneSize"]').val() ?? "medium");
-  let theme = String(form.find('[name="theme"]').val() ?? "dungeon");
-  let lightingMood = String(form.find('[name="lightingMood"]').val() ?? "dim");
-  const useDetectedSettings = form.find('[name="useDetectedSettings"]').is(":checked");
+  const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
+  const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
+  const orientationSpec = getImageOrientationSpec(imageOrientation);
+  const theme = "ai-map";
+  const lightingMood = "dim";
+  const useDetectedSettings = false;
   const seedInput = String(form.find('[name="seed"]').val() ?? "").trim();
   const seed = seedInput || randomSeedString();
 
@@ -747,66 +1966,49 @@ function buildGenerationConfigFromForm(form) {
     return null;
   }
 
-  const detected = parsePromptForSceneSettings(prompt);
-  if (generationMode === "procedural" && useDetectedSettings) {
-    theme = detected.theme;
-    sceneSizeKey = detected.suggestedSize;
-    lightingMood = detected.lightingMood;
-  }
-
-  let aiPlan = null;
-  let layoutGraph = null;
-  let compiledImagePrompt = null;
-  let effectiveDetected = useDetectedSettings ? detected : buildDisabledDetectedPayload(detected);
-
-  if (generationMode === "ai-planner") {
-    aiPlan = parseAiMapPlan(prompt);
-    layoutGraph = buildLayoutGraphFromPlan(aiPlan, seed);
-    compiledImagePrompt = compileInkarnatePrompt(aiPlan, layoutGraph);
-
-    // AI planner provides the final map intent; map it onto current generator knobs.
-    theme = mapAiPlanThemeToSceneTheme(aiPlan);
-    sceneSizeKey = mapAiPlanSizeToSceneSizeKey(aiPlan.mapSize);
-    lightingMood = mapAiPlanLightingToSceneLighting(aiPlan.lightingMood);
-    effectiveDetected = applyAiPlanFeaturesToDetected(effectiveDetected, aiPlan);
-  }
+  const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
+  const compiledImagePrompt = compileInkarnatePrompt(prompt, {
+    imageOrientation,
+    sceneSizeKey,
+    mapCoverageMeters
+  });
 
   const generationData = {
     generationMode,
     prompt,
     sceneSizeKey,
+    imageOrientation,
+    imageSize: orientationSpec.size,
+    mapCoverageMeters,
     theme,
     lightingMood,
-    detected,
+    detected: null,
     useDetectedSettings,
-    effectiveDetected,
-    aiPlan,
-    layoutGraph,
+    effectiveDetected: null,
+    aiPlan: null,
+    layoutGraph: null,
     compiledImagePrompt,
     imageGeneration: {
       provider: getAiImageProvider(),
       compiledPrompt: compiledImagePrompt ?? "",
       imageStatus: "not-requested",
       imagePath: null,
-      costEstimate: {
-        preview: "$0.00 mock",
-        final: "$0.08 placeholder"
-      }
+      costEstimate: null,
+      imageSize: orientationSpec.size,
+      imageOrientation
     },
-    enabledAssetPacks: getEnabledAssetPackIds(),
+    enabledAssetPacks: [],
+    generationLayers: ["background-image"],
     seed,
-    moduleVersion: "0.14.1"
+    moduleVersion: "0.21.0"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
   const formState = {
-    generationMode,
     prompt,
-    sceneSizeKey: String(form.find('[name="sceneSize"]').val() ?? "medium"),
-    theme: String(form.find('[name="theme"]').val() ?? "dungeon"),
-    lightingMood: String(form.find('[name="lightingMood"]').val() ?? "dim"),
     seed,
-    useDetectedSettings
+    mapScale: sceneSizeKey,
+    imageOrientation
   };
 
   return {
@@ -823,52 +2025,71 @@ function buildGenerationConfigFromForm(form) {
 function buildGenerationPreviewData(config) {
   const generationData = config.generationData;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
 
   const rng = createSeededRng(`${generationData.seed}|${generationData.theme}|${generationData.sceneSizeKey}|${generationData.prompt}`);
-  const walls = buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected);
-  const tiles = buildThemeTiles(
-    generationData.theme,
-    widthPx,
-    heightPx,
-    walls,
-    rng,
-    generationData.seed,
-    generationData.effectiveDetected,
-    generationData.enabledAssetPacks
-  );
-  const lights = buildThemeLights(
-    generationData.theme,
-    widthPx,
-    heightPx,
-    rng,
-    generationData.seed,
-    generationData.lightingMood,
-    generationData.effectiveDetected
-  );
+  const walls = ENABLE_SCENE_WALLS_AND_LIGHTS
+    ? buildThemeWalls(generationData.theme, widthPx, heightPx, rng, generationData.seed, generationData.effectiveDetected)
+    : [];
+  const tiles = ENABLE_ASSET_SPAWNING
+    ? buildThemeTiles(
+      generationData.theme,
+      widthPx,
+      heightPx,
+      walls,
+      rng,
+      generationData.seed,
+      generationData.effectiveDetected,
+      generationData.enabledAssetPacks
+    )
+    : { floorTiles: [], propTiles: [] };
+  const lights = ENABLE_SCENE_WALLS_AND_LIGHTS
+    ? buildThemeLights(
+      generationData.theme,
+      widthPx,
+      heightPx,
+      rng,
+      generationData.seed,
+      generationData.lightingMood,
+      generationData.effectiveDetected
+    )
+    : [];
 
   const appliedFeatures = FEATURE_KEYS
     .filter((key) => generationData.effectiveDetected?.features?.[key])
     .map((key) => formatFeatureLabel(key, generationData.effectiveDetected.features));
 
   const estimatedNotes = 1 + (generationData.effectiveDetected?.features?.treasure ? 1 : 0);
-  const packContribution = estimateAssetPackContribution(tiles);
+  const estimatedFloorTiles = ENABLE_ASSET_SPAWNING ? tiles.floorTiles.length : 0;
+  const estimatedPropTiles = ENABLE_ASSET_SPAWNING ? tiles.propTiles.length : 0;
+  const packContribution = ENABLE_ASSET_SPAWNING
+    ? estimateAssetPackContribution(tiles)
+    : {
+      base: 0,
+      "premium-tavern": 0,
+      "dark-dungeon": 0,
+      "rune-ruins": 0
+    };
   const featureImpact = estimateFeatureImpact(generationData);
   debugLog("Preview estimates", {
     theme: generationData.theme,
     size: generationData.sceneSizeKey,
     walls: walls.length,
     lights: lights.length,
-    floorTiles: tiles.floorTiles.length,
-    propTiles: tiles.propTiles.length
+    floorTiles: estimatedFloorTiles,
+    propTiles: estimatedPropTiles
   });
 
   return {
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-image-only",
     finalTheme: generationData.theme,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
+    imageOrientation: generationData.imageOrientation ?? "landscape",
+    imageSize: generationData.imageSize ?? "1536x1024",
+    mapCoverageMeters: generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey),
     lightingMood: generationData.lightingMood,
     appliedFeatures,
     enabledAssetPacks: generationData.enabledAssetPacks,
@@ -876,16 +2097,12 @@ function buildGenerationPreviewData(config) {
     layoutGraph: generationData.layoutGraph,
     compiledImagePrompt: generationData.compiledImagePrompt,
     aiImageProvider: generationData.imageGeneration?.provider ?? "none",
-    aiImageCostEstimate: generationData.imageGeneration?.costEstimate ?? {
-      preview: "$0.00 mock",
-      final: "$0.08 placeholder"
-    },
-    aiReadableSummary: generationData.aiPlan ? buildAiPlanReadableSummary(generationData.aiPlan) : null,
+    aiReadableSummary: null,
     estimated: {
       walls: walls.length,
       ambientLights: lights.length,
-      floorTiles: tiles.floorTiles.length,
-      propTiles: tiles.propTiles.length,
+      floorTiles: estimatedFloorTiles,
+      propTiles: estimatedPropTiles,
       notes: estimatedNotes
     },
     packContribution,
@@ -962,8 +2179,7 @@ async function openGenerationPreviewDialog(config, previewData) {
   const compiledPromptHtml = previewData.compiledImagePrompt
     ? foundry.utils.escapeHTML(previewData.compiledImagePrompt)
     : "";
-  const aiPlannerSection = previewData.generationMode === "ai-planner"
-    ? `
+  const aiPlannerSection = `
   <hr/>
   <p><strong>AI Planner Summary</strong></p>
   <ul>${aiSummaryHtml}</ul>
@@ -974,13 +2190,11 @@ async function openGenerationPreviewDialog(config, previewData) {
   <p><strong>Compiled Image Prompt Preview</strong></p>
   <pre>${compiledPromptHtml}</pre>
   <p><strong>AI Image Provider:</strong> ${foundry.utils.escapeHTML(previewData.aiImageProvider)}</p>
-  <p><strong>Cost Estimate:</strong> preview image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.preview)}, final image ${foundry.utils.escapeHTML(previewData.aiImageCostEstimate.final)}</p>
-    `
-    : "";
+    `;
 
   const content = `
 <div class="sceneforge-preview">
-  <p><strong>Generation Mode:</strong> ${previewData.generationMode === "ai-planner" ? "AI Planner Mode" : "Procedural Mode"}</p>
+  <p><strong>Generation Mode:</strong> AI Planner Mode</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
@@ -1035,16 +2249,6 @@ async function openGenerationPreviewDialog(config, previewData) {
       }
     };
 
-    if (previewData.generationMode === "ai-planner") {
-      const provider = previewData.aiImageProvider;
-      const mockLabel = provider === "openai" ? "Generate AI Map (Paid)" : "Generate Mock AI Map";
-      buttons.mock = {
-        icon: '<i class="fas fa-image"></i>',
-        label: mockLabel,
-        callback: () => resolve("mock")
-      };
-    }
-
     const dialog = new Dialog({
       title: "SceneForge Preview Mode",
       content,
@@ -1059,27 +2263,57 @@ async function openGenerationPreviewDialog(config, previewData) {
     await openGeneratorDialog(config.formState);
     return;
   }
-  if (userChoice === "mock") {
-    await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
-    return;
-  }
   if (userChoice !== "confirm") return;
 
-  await createSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
+  debugLog("AI Planner Confirm clicked");
+  await createMockAiSceneFromGenerationData(config.generationData, config.seedWasAutoGenerated);
 }
 
 /**
  * Shared scene creation path used after preview confirmation.
  */
 async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false, options = {}) {
-  const { backgroundPath = null, imageGenerationMetadata = null } = options;
-  const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
-  const sceneName = `SceneForge - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
+  const { backgroundPath = null, imageGenerationMetadata = null, sceneNamePrefix = "SceneForge" } = options;
+  const isAiImageMode = generationData?.generationMode === "ai-image-only" || generationData?.generationMode === "ai-planner";
+  const activeProvider = imageGenerationMetadata?.provider ?? getAiImageProvider();
+  if (isAiImageMode) {
+    const imageStatus = imageGenerationMetadata?.imageStatus ?? null;
+    const imagePath = imageGenerationMetadata?.imagePath ?? backgroundPath ?? null;
+    const hasValidAiImage = (
+      (activeProvider === "openai" && imageStatus === "complete")
+      || (activeProvider === "mock" && imageStatus === "mock-generated")
+      || (activeProvider === "subscription" && imageStatus === "complete")
+      || (activeProvider === "cache" && imageStatus === "reused")
+    ) && Boolean(imagePath);
 
+    if (!hasValidAiImage) {
+      logImagePipelineError("createSceneFromGenerationData precondition failed", {
+        provider: activeProvider,
+        imageStatus,
+        imagePath
+      });
+      ui.notifications.error("SceneForge AI: AI image generation must complete before scene creation.");
+      if (activeProvider === "openai") {
+        debugLog("OpenAI generation failed, aborting scene creation");
+      }
+      return;
+    }
+  }
+
+  const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = Number(generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey));
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
+  const sceneName = buildSceneNameFromPrompt(generationData?.prompt ?? "", {
+    prefix: sceneNamePrefix,
+    fallback: "Map"
+  });
+
+  let createdScene = null;
   try {
-    const resolvedGenerationData = imageGenerationMetadata
+    let resolvedGenerationData = imageGenerationMetadata
       ? { ...generationData, imageGeneration: imageGenerationMetadata }
       : generationData;
 
@@ -1090,11 +2324,11 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       padding: 0.1,
       grid: {
         type: CONST.GRID_TYPES.SQUARE,
-        size: GRID_SIZE_PX,
-        distance: 5,
-        units: "ft"
+        size: gridPixelSize,
+        distance: metersPerGrid,
+        units: "m"
       },
-      backgroundColor: "#2b2b2b",
+      backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR,
       navigation: true,
       flags: {
         [MODULE_ID]: {
@@ -1103,49 +2337,255 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       }
     };
     const scene = await safeSceneCreate(scenePayload, "createSceneFromGenerationData.Scene.create");
+    createdScene = scene;
 
     if (!scene) throw new Error("Scene creation returned no scene document.");
 
+    let backgroundVerified = false;
+    let persistedBackgroundPath = null;
     if (backgroundPath) {
-      await scene.update({
-        background: {
-          src: backgroundPath
-        }
+      debugLog("Scene background imagePath received", backgroundPath);
+      persistedBackgroundPath = await persistSceneBackgroundPath(backgroundPath, {
+        seed: resolvedGenerationData.seed,
+        provider: imageGenerationMetadata?.provider ?? "ai"
       });
+      debugLog("Scene background path resolved", persistedBackgroundPath);
+      debugLog("Scene background before update", getSceneBackgroundSrc(scene));
+
+      if (imageGenerationMetadata && persistedBackgroundPath && imageGenerationMetadata.imagePath !== persistedBackgroundPath) {
+        const updatedImageGenerationMetadata = {
+          ...imageGenerationMetadata,
+          imagePath: persistedBackgroundPath
+        };
+        resolvedGenerationData = {
+          ...resolvedGenerationData,
+          imageGeneration: updatedImageGenerationMetadata
+        };
+      }
+
+      if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && !persistedBackgroundPath) {
+        logImagePipelineError("background persistence failed", {
+          provider: activeProvider,
+          imagePath: backgroundPath,
+          persistedBackgroundPath,
+          sceneId: scene.id,
+          sceneName: scene.name
+        });
+        await scene.delete();
+        ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
+        return;
+      }
+
+      // Reduce blur by matching scene pixel dimensions to the generated image.
+      // The old fixed 50x50 grid at 100px (5000x5000) stretched 1024px maps heavily.
+      const imageDimensions = await getImagePixelDimensions(persistedBackgroundPath);
+      if (imageDimensions?.width && imageDimensions?.height) {
+        const resolvedGridPixelSize = getSceneGridPixelSize(resolvedGenerationData.sceneSizeKey);
+        const mapCoverageMeters = Number(resolvedGenerationData.mapCoverageMeters ?? getMapCoverageMeters(resolvedGenerationData.sceneSizeKey));
+        const gridSquaresAcross = Math.max(1, imageDimensions.width / resolvedGridPixelSize);
+        const metersPerGrid = Math.max(0.1, mapCoverageMeters / gridSquaresAcross);
+        await scene.update({
+          width: imageDimensions.width,
+          height: imageDimensions.height,
+          grid: {
+            type: CONST.GRID_TYPES.SQUARE,
+            size: resolvedGridPixelSize,
+            distance: metersPerGrid,
+            units: "m"
+          },
+          backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR
+        });
+      }
+
+      const backgroundApplyResult = await applyBackgroundToScene(scene, persistedBackgroundPath);
+      const updatedBackgroundSrc = backgroundApplyResult.finalBackgroundSrc;
+      debugLog("Scene background after update", updatedBackgroundSrc);
+      backgroundVerified = Boolean(persistedBackgroundPath) && backgroundApplyResult.applied;
+
+      if (!backgroundVerified && (activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache")) {
+        logImagePipelineError("background verification failed", {
+          provider: activeProvider,
+          imagePath: backgroundPath,
+          persistedBackgroundPath,
+          updatedBackgroundSrc,
+          sceneId: scene.id,
+          sceneName: scene.name
+        });
+        await scene.delete();
+        ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
+        return;
+      }
+
+      if (backgroundVerified) {
+        debugLog("SceneForge AI: Map image verified as scene background.");
+        ui.notifications.info("SceneForge AI: Map image applied as scene background.");
+      }
     }
 
-    if (imageGenerationMetadata) {
-      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, imageGenerationMetadata);
+    if (resolvedGenerationData.imageGeneration) {
+      await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, resolvedGenerationData.imageGeneration);
     }
 
-    await generateSceneLayout(scene, resolvedGenerationData);
+    if (persistedBackgroundPath) {
+      if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
+        await markImageDumpEntryUsed(resolvedGenerationData.imageGeneration.cacheEntryId, scene);
+      } else if (resolvedGenerationData.imageGeneration?.provider !== "none") {
+        await recordGeneratedImageDumpEntry({
+          generationData: resolvedGenerationData,
+          imageGenerationMetadata: resolvedGenerationData.imageGeneration,
+          imagePath: persistedBackgroundPath,
+          scene
+        });
+      }
+    }
 
     if (seedWasAutoGenerated) {
       ui.notifications.info(`SceneForge AI: Seed auto-generated as "${resolvedGenerationData.seed}".`);
     }
-    ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
+    const shouldShowCreatedSuccess = !backgroundPath || backgroundVerified;
+    if (shouldShowCreatedSuccess) {
+      ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
+    }
+    try {
+      await scene.activate();
+    } catch (_activateError) {
+      // Non-fatal: scene already exists even if activation fails.
+    }
+    await promptForGeneratedSceneVote(scene);
   } catch (error) {
+    if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && createdScene) {
+      logImagePipelineError("scene creation failed after OpenAI image generation", {
+        provider: activeProvider,
+        sceneId: createdScene?.id ?? null,
+        sceneName: createdScene?.name ?? null
+      }, error);
+      try {
+        await createdScene.delete();
+      } catch (_deleteError) {
+        // Ignore cleanup errors; original failure is reported below.
+      }
+      ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
+      return;
+    }
     console.error(`${MODULE_ID} | Scene generation failed`, error);
     ui.notifications.error("SceneForge AI: Failed to generate scene. Check browser console for details.");
   }
 }
 
 /**
- * Preview button path for AI Planner Mode.
- * Uses configured provider architecture and handles failures safely.
+ * Main image-generation path using configured provider architecture.
  */
 async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+  if (isGlobalLibraryOnlyModeEnabled()) {
+    const provider = getAiImageProvider();
+    if (provider !== "subscription") {
+      ui.notifications.error("SceneForge AI: Global library mode requires AI provider set to Subscription Backend.");
+      return;
+    }
+    if (!canUseGlobalImageDumpLibrary()) {
+      ui.notifications.error("SceneForge AI: Global library mode requires backend URL and subscription auth token.");
+      return;
+    }
+  }
+
+  let reusableEntry = null;
+  try {
+    reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
+  } catch (error) {
+    logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
+    ui.notifications.warn("SceneForge AI: Global cache lookup failed. Proceeding with new image generation.");
+    reusableEntry = null;
+  }
+  if (reusableEntry) {
+    console.info(`${MODULE_ID} | Reusing cached image from dump library`, {
+      entryId: reusableEntry.id,
+      prompt: reusableEntry.promptExact,
+      imagePath: reusableEntry.imagePath
+    });
+    ui.notifications.info("SceneForge AI: Reused a previously generated map for this exact prompt.");
+    const imageGenerationMetadata = {
+      provider: "cache",
+      compiledPrompt: generationData.compiledImagePrompt ?? "",
+      imageStatus: "reused",
+      imagePath: reusableEntry.imagePath,
+      costEstimate: {
+        preview: "$0.00 cached",
+        final: "$0.00 cached"
+      },
+      cacheEntryId: reusableEntry.id
+    };
+    await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+      backgroundPath: reusableEntry.imagePath,
+      imageGenerationMetadata,
+      sceneNamePrefix: "SceneForge Cached"
+    });
+    return;
+  }
+
+  const provider = getAiImageProvider();
+  if (provider === "none") {
+    logImagePipelineError("no AI provider selected", { provider });
+    ui.notifications.error("SceneForge AI: No AI image provider selected.");
+    return;
+  }
+  if (provider === "openai" && !getOpenAiApiKey()) {
+    logImagePipelineError("OpenAI API key missing", { provider });
+    ui.notifications.error("SceneForge AI: OpenAI API key required before AI map generation.");
+    return;
+  }
+  if (provider === "bfl" && !getBflApiKey()) {
+    logImagePipelineError("BFL API key missing", { provider });
+    ui.notifications.error("SceneForge AI: BFL API key required before AI map generation.");
+    return;
+  }
+  if (provider === "openai") {
+    debugLog("OpenAI generation path called");
+  }
+
   const compiledPrompt = generationData.compiledImagePrompt ?? "";
   const imageResult = await generateAiMapImage(compiledPrompt, {
     mode: "preview",
-    seed: generationData.seed
+    seed: generationData.seed,
+    sourcePrompt: generationData.prompt ?? "",
+    imageSize: generationData.imageSize ?? getImageOrientationSpec(generationData.imageOrientation).size,
+    imageOrientation: generationData.imageOrientation ?? "landscape"
   });
+  debugLog("AI imageResult", imageResult);
 
   if (imageResult?.imageStatus === "failed") {
     const errorMessage = imageResult.errorMessage ?? "Image generation failed.";
+    logImagePipelineError("image generation failed", {
+      provider: imageResult?.provider ?? provider,
+      imageStatus: imageResult?.imageStatus ?? null,
+      errorMessage,
+      seed: generationData.seed
+    });
     ui.notifications.error(`SceneForge AI: ${errorMessage}`);
-  } else if (!imageResult?.imagePath) {
-    ui.notifications.warn("SceneForge AI: Image generation did not produce a background path.");
+    if (imageResult?.provider === "openai") {
+      debugLog("OpenAI generation failed, aborting scene creation");
+    }
+    return;
+  }
+
+  const validImageForScene = (
+    (imageResult?.provider === "openai" && imageResult?.imageStatus === "complete")
+    || (imageResult?.provider === "mock" && imageResult?.imageStatus === "mock-generated")
+    || (imageResult?.provider === "subscription" && imageResult?.imageStatus === "complete")
+    || (imageResult?.provider === "cache" && imageResult?.imageStatus === "reused")
+  ) && Boolean(imageResult?.imagePath);
+
+  if (!validImageForScene) {
+    logImagePipelineError("invalid image result for scene creation", {
+      provider: imageResult?.provider ?? provider,
+      imageStatus: imageResult?.imageStatus ?? null,
+      imagePath: imageResult?.imagePath ?? null,
+      seed: generationData.seed
+    });
+    ui.notifications.error("SceneForge AI: Image generation did not return a valid map image.");
+    if (imageResult?.provider === "openai") {
+      debugLog("OpenAI generation failed, aborting scene creation");
+    }
+    return;
   }
 
   const imageGenerationMetadata = {
@@ -1153,15 +2593,292 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     compiledPrompt,
     imageStatus: imageResult.imageStatus,
     imagePath: imageResult.imagePath,
-    costEstimate: imageResult.costEstimate
+    costEstimate: imageResult.costEstimate,
+    generationMetadata: imageResult.generationMetadata ?? null
   };
 
+  if (imageResult?.provider === "subscription" && imageResult?.generationMetadata) {
+    debugLog("Subscription generation metadata returned to module", imageResult.generationMetadata);
+  }
+
   await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
-    backgroundPath: imageResult.imageStatus === "complete" || imageResult.imageStatus === "mock-generated"
-      ? (imageResult.imagePath ?? null)
-      : null,
-    imageGenerationMetadata
+    backgroundPath: imageResult.imagePath ?? null,
+    imageGenerationMetadata,
+    sceneNamePrefix: imageResult.provider === "mock" ? "SceneForge Mock Test Scene" : "SceneForge"
   });
+}
+
+function buildSceneImageEditPrompt(userInstructions, preserveOptions, strength) {
+  const selectedPreserve = [];
+  if (preserveOptions?.artStyle) selectedPreserve.push("Art style");
+  if (preserveOptions?.lighting) selectedPreserve.push("Lighting");
+  if (preserveOptions?.terrain) selectedPreserve.push("Terrain");
+  if (preserveOptions?.structures) selectedPreserve.push("Structures");
+  const preserveLine = selectedPreserve.length > 0 ? selectedPreserve.join(", ") : "None selected";
+
+  return [
+    "You are editing an existing top-down fantasy battle map. Make only the requested changes. Preserve the original camera angle, art style, lighting, terrain, composition, and map usability unless the user specifically asks otherwise.",
+    "",
+    `USER EDIT:\n${String(userInstructions ?? "").trim()}`,
+    "",
+    `PRESERVE:\n${preserveLine}`,
+    "",
+    `CHANGE STRENGTH:\nApply approximately ${Math.max(0, Math.min(100, Number(strength) || 0))}% change. Lower strength means minimal edits and maximum consistency.`,
+    "",
+    "HARD CONSTRAINTS:",
+    "- Keep TRUE TOP DOWN battle map perspective.",
+    "- Keep 90 degree orthographic camera.",
+    "- Keep gridless VTT map format.",
+    "- No characters.",
+    "- No text.",
+    "- No labels.",
+    "- No UI elements.",
+    "- No isometric angle.",
+    "- No cinematic perspective.",
+    "- Return only the edited map image."
+  ].join("\n");
+}
+
+async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) {
+  const provider = "openai";
+  const costEstimate = {
+    preview: "$0.00 mock",
+    final: "$0.08 placeholder"
+  };
+  const apiKey = getOpenAiApiKey();
+  if (!apiKey) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "OpenAI API key required before AI image editing."
+    };
+  }
+
+  try {
+    const referenceImage = await loadImageAsBlobOrFile(referenceImagePath, {
+      filenamePrefix: "sceneforge-edit-reference"
+    });
+    const endpoint = "https://api.openai.com/v1/images/edits";
+    debugLog("OpenAI endpoint called:", endpoint);
+    const form = new FormData();
+    form.append("model", "gpt-image-1");
+    form.append("prompt", String(editPrompt ?? ""));
+    form.append("size", "1024x1024");
+    if (referenceImage.file instanceof Blob) {
+      form.append("image", referenceImage.file, referenceImage.filename);
+    } else {
+      form.append("image", referenceImage.file);
+    }
+    if (DEBUG) {
+      debugLog("OpenAI image edit request metadata", {
+        endpoint,
+        method: "POST",
+        hasReferenceImage: true
+      });
+    }
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: form
+    });
+    if (!response.ok) {
+      logImagePipelineError("OpenAI image edit request failed", {
+        provider,
+        endpoint,
+        status: response.status
+      });
+      throw new Error(`OpenAI image edit request failed (${response.status}).`);
+    }
+
+    debugLog("OpenAI response headers", [...response.headers.entries()]);
+    debugLog("OpenAI success response", await response.clone().text());
+
+    const payload = await response.json();
+    const first = payload?.data?.[0] ?? null;
+    const imagePath = first?.b64_json
+      ? `data:image/png;base64,${first.b64_json}`
+      : (first?.url ?? null);
+    if (!imagePath) {
+      throw new Error("OpenAI image edit response did not include an image payload.");
+    }
+    return {
+      provider,
+      imageStatus: "complete",
+      imagePath,
+      costEstimate
+    };
+  } catch (error) {
+    logImagePipelineError("OpenAI image edit exception", { provider }, error);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `OpenAI image edit failed: ${error?.message ?? "unknown error"}`
+    };
+  }
+}
+
+async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
+  const provider = getAiImageProvider();
+  if (provider === "none") {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      errorMessage: "No AI image provider selected."
+    };
+  }
+  if (provider === "mock") {
+    return {
+      provider,
+      imageStatus: "mock-edited",
+      imagePath: buildMockMapBackgroundDataUri({ seed: `edit-${Date.now()}` }),
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.00 mock"
+      }
+    };
+  }
+  if (provider === "openai") {
+    return editOpenAiMapImage(referenceImagePath, editPrompt, options);
+  }
+  return {
+    provider,
+    imageStatus: "failed",
+    imagePath: null,
+    errorMessage: "SceneForge AI: Image editing currently supports OpenAI (or Mock test mode) only."
+  };
+}
+
+async function handleSceneImageEdit(scene, editConfig) {
+  const originalBackgroundPath = getSceneBackgroundPath(scene);
+  if (!originalBackgroundPath) {
+    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    return;
+  }
+  if (getAiImageProvider() === "none") {
+    ui.notifications.error("SceneForge AI: No AI image provider selected.");
+    return;
+  }
+  const editPrompt = buildSceneImageEditPrompt(
+    editConfig.instructions,
+    editConfig.preserveOptions,
+    editConfig.strength
+  );
+  const result = await editAiMapImage(originalBackgroundPath, editPrompt, {
+    strength: editConfig.strength,
+    preserveOptions: editConfig.preserveOptions
+  });
+  if (!result?.imagePath || (result.imageStatus !== "complete" && result.imageStatus !== "mock-edited")) {
+    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    return;
+  }
+
+  try {
+    const persistedPath = await persistEditedSceneBackground(result.imagePath, {
+      seed: scene?.id ?? "scene-edit",
+      provider: result.provider ?? "edit"
+    });
+    if (!persistedPath) throw new Error("No persisted edited image path returned.");
+    const applyResult = await applyBackgroundToScene(scene, persistedPath);
+    const finalBackgroundSrc = String(applyResult?.finalBackgroundSrc ?? "").trim();
+    const recheckedBackgroundSrc = getSceneBackgroundPath(scene);
+    const isVerified =
+      pathsLikelyMatch(finalBackgroundSrc, persistedPath)
+      || pathsLikelyMatch(recheckedBackgroundSrc, persistedPath);
+    if (!applyResult?.applied || !isVerified) {
+      await applyBackgroundToScene(scene, originalBackgroundPath);
+      throw new Error("Scene background verification failed after edit.");
+    }
+    ui.notifications.info("SceneForge AI: Edited map applied successfully.");
+  } catch (error) {
+    logImagePipelineError("scene image edit apply failed", {
+      sceneId: scene?.id ?? null,
+      sceneName: scene?.name ?? null
+    }, error);
+    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+  }
+}
+
+async function openSceneImageEditDialog(scene) {
+  const currentBackgroundPath = getSceneBackgroundPath(scene);
+  if (!currentBackgroundPath) {
+    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    return;
+  }
+  const content = `
+<form class="sceneforge-edit-form">
+  <div class="form-group">
+    <label>Current Map</label>
+    <div style="margin-top:6px;">
+      <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" style="max-width:100%; max-height:220px; border-radius:6px; object-fit:contain;" />
+    </div>
+  </div>
+  <div class="form-group">
+    <label for="sf-edit-instructions">Edit Instructions</label>
+    <textarea id="sf-edit-instructions" name="instructions" rows="5" placeholder="Example: Move the ship away from the pathway and dock it along the right side. Keep the beach, road, dock, and ocean unchanged." required></textarea>
+  </div>
+  <fieldset class="form-group">
+    <legend>Preserve</legend>
+    <label><input type="checkbox" name="preserveArtStyle" checked /> Art style</label><br/>
+    <label><input type="checkbox" name="preserveLighting" checked /> Lighting</label><br/>
+    <label><input type="checkbox" name="preserveTerrain" checked /> Terrain</label><br/>
+    <label><input type="checkbox" name="preserveStructures" checked /> Structures</label>
+  </fieldset>
+  <div class="form-group">
+    <label for="sf-edit-strength">Change Strength: <span class="sf-edit-strength-value">30</span>%</label>
+    <input id="sf-edit-strength" type="range" name="strength" min="0" max="100" value="30" />
+  </div>
+</form>
+  `;
+
+  const dialog = new Dialog({
+    title: "SceneForge AI - Edit Image",
+    content,
+    buttons: {
+      generate: {
+        icon: '<i class="fas fa-wand-magic-sparkles"></i>',
+        label: "Generate Edited Image",
+        callback: async (dialogHtml) => {
+          const form = dialogHtml.find(".sceneforge-edit-form");
+          const instructions = String(form.find('[name="instructions"]').val() ?? "").trim();
+          if (!instructions) {
+            ui.notifications.warn("SceneForge AI: Please enter edit instructions.");
+            return;
+          }
+          await handleSceneImageEdit(scene, {
+            instructions,
+            preserveOptions: {
+              artStyle: form.find('[name="preserveArtStyle"]').is(":checked"),
+              lighting: form.find('[name="preserveLighting"]').is(":checked"),
+              terrain: form.find('[name="preserveTerrain"]').is(":checked"),
+              structures: form.find('[name="preserveStructures"]').is(":checked")
+            },
+            strength: Number(form.find('[name="strength"]').val() ?? 30)
+          });
+        }
+      },
+      cancel: {
+        icon: '<i class="fas fa-times"></i>',
+        label: "Cancel"
+      }
+    },
+    default: "generate",
+    render: (dialogHtml) => {
+      const slider = dialogHtml.find('[name="strength"]');
+      const strengthValue = dialogHtml.find(".sf-edit-strength-value");
+      slider.on("input change", () => {
+        strengthValue.text(String(slider.val() ?? 30));
+      });
+    }
+  });
+  dialog.render(true);
 }
 
 /**
@@ -1170,7 +2887,21 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
  */
 async function generateAiMapImage(compiledPrompt, options = {}) {
   const configuredProvider = getAiImageProvider();
-  const provider = configuredProvider === "none" ? "mock" : configuredProvider;
+  const provider = configuredProvider;
+  console.info(`${MODULE_ID} | AI image provider selected: ${provider}`);
+
+  if (provider === "none") {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate: {
+        preview: "$0.00 mock",
+        final: "$0.08 placeholder"
+      },
+      errorMessage: "No AI image provider selected."
+    };
+  }
 
   if (provider === "mock") {
     debugLog("Mock provider compiled prompt", compiledPrompt);
@@ -1186,7 +2917,16 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
     };
   }
 
+  if (provider === "subscription") {
+    return generateSubscriptionMapImage(compiledPrompt, options);
+  }
+
+  if (provider === "bfl") {
+    return generateBflMapImage(compiledPrompt, options);
+  }
+
   if (provider === "openai") {
+    debugLog("OpenAI generation path called");
     return generateOpenAiMapImage(compiledPrompt, options);
   }
 
@@ -1202,6 +2942,394 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
   };
 }
 
+async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
+  const provider = "subscription";
+  const costEstimate = { preview: "included with subscription", final: "included with subscription" };
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
+  const token = getSubscriptionAuthToken();
+
+  if (!backendBaseUrl) {
+    logImagePipelineError("subscription backend url missing", { provider });
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "Subscription backend URL is not configured."
+    };
+  }
+
+  if (!token) {
+    const connectUrl = getPatreonConnectUrl();
+    logImagePipelineError("subscription auth token missing", { provider, connectUrl });
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: connectUrl
+        ? `Subscription token missing. Link Patreon first: ${connectUrl}`
+        : "Subscription token missing. Link Patreon first."
+    };
+  }
+
+  const subscriptionSync = await syncPatreonSubscriptionStatus({ notify: false });
+  const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
+  if (subscriptionSync.ok && subscriptionState.active === false) {
+    const manageUrl = getPatreonManageUrl();
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: manageUrl
+        ? `Patreon subscription is inactive. Manage subscription: ${manageUrl}`
+        : "Patreon subscription is inactive."
+    };
+  }
+  if (
+    subscriptionSync.ok
+    && !subscriptionState.unlimitedGenerations
+    && subscriptionState.usageLimit > 0
+    && subscriptionState.usageCount >= subscriptionState.usageLimit
+  ) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `Monthly generation limit reached (${subscriptionState.usageCount}/${subscriptionState.usageLimit}). Resets at the next billing month.`
+    };
+  }
+  const requestToken = getSubscriptionAuthToken() || token;
+
+  const endpoint = `${backendBaseUrl}/api/maps/generate`;
+  console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
+  const requestPayload = {
+    compiledPrompt,
+    seed: options.seed ?? null,
+    plan: options.plan ?? null,
+    layoutGraph: options.layoutGraph ?? null,
+    sourcePrompt: options.sourcePrompt ?? "",
+    imageSize: options.imageSize ?? "1536x1024",
+    imageOrientation: options.imageOrientation ?? "landscape"
+  };
+  debugLog("Subscription generation request", { endpoint, requestPayload });
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${requestToken}`
+      },
+      body: JSON.stringify(requestPayload)
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const backendMessage = String(payload?.error ?? payload?.message ?? "");
+      if (response.status === 401 || response.status === 403) {
+        const manageUrl = getPatreonManageUrl();
+        logImagePipelineError("subscription backend unauthorized", {
+          provider,
+          status: response.status,
+          backendMessage,
+          manageUrl
+        });
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: manageUrl
+            ? `Subscription access denied. Verify Patreon status: ${manageUrl}`
+            : "Subscription access denied. Verify Patreon status."
+        };
+      }
+      logImagePipelineError("subscription backend request failed", {
+        provider,
+        status: response.status,
+        backendMessage
+      });
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: backendMessage || `Subscription backend request failed (${response.status}).`
+      };
+    }
+
+    const generationMetadata = extractSubscriptionGenerationMetadata(payload, endpoint);
+    debugLog("Subscription downstream endpoint called:", generationMetadata.endpoint);
+    debugLog("Subscription generation metadata", generationMetadata);
+    debugLog("Subscription generation cost fields", {
+      estimatedCost: generationMetadata.estimatedCost,
+      rawCostFields: generationMetadata.rawCostFields
+    });
+
+    const imagePath = payload?.imagePath ?? payload?.image_url ?? payload?.url ?? null;
+    if (!imagePath) {
+      logImagePipelineError("subscription backend returned no image path", {
+        provider,
+        payloadKeys: Object.keys(payload ?? {})
+      });
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: "Subscription backend returned no map image."
+      };
+    }
+
+    return {
+      provider,
+      imageStatus: "complete",
+      imagePath: String(imagePath),
+      costEstimate,
+      generationMetadata
+    };
+  } catch (error) {
+    logImagePipelineError("subscription backend exception", { provider, endpoint }, error);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `Subscription backend request failed: ${error?.message ?? "unknown error"}`
+    };
+  }
+}
+
+function extractSubscriptionGenerationMetadata(payload, backendEndpoint) {
+  const normalizedPayload = payload && typeof payload === "object" ? payload : {};
+  const provider = String(
+    normalizedPayload?.provider
+    ?? normalizedPayload?.generation?.provider
+    ?? "subscription-backend"
+  );
+  const model = String(
+    normalizedPayload?.model
+    ?? normalizedPayload?.generation?.model
+    ?? "unknown"
+  );
+  const endpoint = String(
+    normalizedPayload?.endpoint
+    ?? normalizedPayload?.providerEndpoint
+    ?? normalizedPayload?.generation?.endpoint
+    ?? backendEndpoint
+  );
+  const generationId = String(
+    normalizedPayload?.generationId
+    ?? normalizedPayload?.id
+    ?? normalizedPayload?.generation?.id
+    ?? ""
+  );
+
+  const imageCountCandidate = Number(
+    normalizedPayload?.imageCount
+    ?? normalizedPayload?.images?.length
+    ?? normalizedPayload?.data?.length
+    ?? 1
+  );
+  const imageCount = Number.isFinite(imageCountCandidate) && imageCountCandidate > 0
+    ? imageCountCandidate
+    : 1;
+
+  const estimatedCost = normalizedPayload?.estimatedCost
+    ?? normalizedPayload?.cost
+    ?? normalizedPayload?.pricing?.estimatedCost
+    ?? null;
+
+  return {
+    provider,
+    model,
+    endpoint,
+    estimatedCost,
+    generationId,
+    imageCount,
+    rawCostFields: {
+      cost: normalizedPayload?.cost ?? null,
+      estimatedCost: normalizedPayload?.estimatedCost ?? null,
+      usage: normalizedPayload?.usage ?? null,
+      pricing: normalizedPayload?.pricing ?? null
+    }
+  };
+}
+
+function parseImageSizeToBflDimensions(imageSize) {
+  const raw = String(imageSize ?? "").trim();
+  const match = raw.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!match) return { width: 1024, height: 1024 };
+  const width = Math.max(256, Number(match[1] ?? 1024));
+  const height = Math.max(256, Number(match[2] ?? 1024));
+  return { width, height };
+}
+
+async function generateBflMapImage(compiledPrompt, options = {}) {
+  const provider = "bfl";
+  const costEstimate = {
+    preview: "$0.00 mock",
+    final: "BFL variable"
+  };
+  const apiKey = getBflApiKey();
+  if (!apiKey) {
+    logImagePipelineError("BFL API key missing", { provider });
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "BFL API key required before AI map generation."
+    };
+  }
+
+  const submitEndpoint = "https://api.bfl.ai/v1/flux-pro-1.1";
+  const { width, height } = parseImageSizeToBflDimensions(options.imageSize ?? "1024x1024");
+  const requestPayload = {
+    prompt: String(compiledPrompt ?? ""),
+    width,
+    height
+  };
+
+  try {
+    debugLog("BFL endpoint called:", submitEndpoint);
+    debugLog("BFL request metadata", {
+      endpoint: submitEndpoint,
+      method: "POST",
+      hasApiKey: true,
+      width,
+      height
+    });
+
+    const submitResponse = await fetch(submitEndpoint, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "Content-Type": "application/json",
+        "x-key": apiKey
+      },
+      body: JSON.stringify(requestPayload)
+    });
+    const submitPayload = await submitResponse.json().catch(() => ({}));
+    if (!submitResponse.ok) {
+      const message = String(submitPayload?.error ?? submitPayload?.message ?? "");
+      logImagePipelineError("BFL submit request failed", {
+        provider,
+        endpoint: submitEndpoint,
+        status: submitResponse.status,
+        message
+      });
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: message || `BFL generation request failed (${submitResponse.status}).`
+      };
+    }
+
+    const generationId = String(submitPayload?.id ?? "").trim();
+    const pollingUrl = String(
+      submitPayload?.polling_url
+      ?? (generationId ? `https://api.bfl.ai/v1/get_result?id=${encodeURIComponent(generationId)}` : "")
+    ).trim();
+    if (!pollingUrl) {
+      return {
+        provider,
+        imageStatus: "failed",
+        imagePath: null,
+        costEstimate,
+        errorMessage: "BFL generation response did not include polling URL."
+      };
+    }
+    debugLog("BFL endpoint called:", pollingUrl);
+
+    const startedAt = Date.now();
+    const timeoutMs = 120000;
+    while (Date.now() - startedAt < timeoutMs) {
+      const pollResponse = await fetch(pollingUrl, {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+          "x-key": apiKey
+        }
+      });
+      const pollPayload = await pollResponse.json().catch(() => ({}));
+      if (!pollResponse.ok) {
+        const message = String(pollPayload?.error ?? pollPayload?.message ?? "");
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: message || `BFL polling request failed (${pollResponse.status}).`
+        };
+      }
+
+      const status = String(pollPayload?.status ?? "").trim().toLowerCase();
+      if (status === "ready") {
+        const imagePath = String(pollPayload?.result?.sample ?? "").trim();
+        if (!imagePath) {
+          return {
+            provider,
+            imageStatus: "failed",
+            imagePath: null,
+            costEstimate,
+            errorMessage: "BFL response was Ready but no image URL was returned."
+          };
+        }
+        return {
+          provider,
+          imageStatus: "complete",
+          imagePath,
+          costEstimate,
+          generationMetadata: {
+            provider: "bfl",
+            model: "flux-pro-1.1",
+            endpoint: submitEndpoint,
+            estimatedCost: null,
+            generationId,
+            imageCount: 1
+          }
+        };
+      }
+      if (status === "error" || status === "failed" || status.includes("moderat") || status === "task not found") {
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: String(pollPayload?.error ?? pollPayload?.message ?? `BFL generation failed with status: ${status}`)
+        };
+      }
+
+      // BFL async generation requires polling until Ready.
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "BFL generation timed out while waiting for result."
+    };
+  } catch (error) {
+    logImagePipelineError("BFL generation exception", { provider, endpoint: submitEndpoint }, error);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: `BFL generation failed: ${error?.message ?? "unknown error"}`
+    };
+  }
+}
+
 /**
  * Real OpenAI image generation path with hard safety controls.
  */
@@ -1214,18 +3342,24 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
 
   const apiKey = getOpenAiApiKey();
   if (!apiKey) {
+    logImagePipelineError("OpenAI API key missing", { provider });
     return {
       provider,
       imageStatus: "failed",
       imagePath: null,
       costEstimate,
-      errorMessage: "OpenAI API key is missing. Add it in SceneForge module settings."
+      errorMessage: "OpenAI API key required before AI map generation."
     };
   }
 
   const monthlyLimit = getOpenAiMonthlyLimit();
   const usage = await getOpenAiUsageState();
   if (usage.count >= monthlyLimit) {
+    logImagePipelineError("OpenAI monthly limit reached", {
+      provider,
+      usageCount: usage.count,
+      monthlyLimit
+    });
     return {
       provider,
       imageStatus: "failed",
@@ -1242,6 +3376,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
     requireConfirmation: isPaidGenerationConfirmationEnabled()
   });
   if (!confirmed) {
+    logImagePipelineError("OpenAI paid generation cancelled", { provider });
     return {
       provider,
       imageStatus: "failed",
@@ -1252,30 +3387,56 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/images/generations", {
+    const endpoint = "https://api.openai.com/v1/images/generations";
+    debugLog("OpenAI endpoint called:", endpoint);
+    console.info(`${MODULE_ID} | OpenAI endpoint: ${endpoint} (model: gpt-image-1)`);
+    const requestPayload = {
+      model: "gpt-image-1",
+      prompt: compiledPrompt,
+      size: String(options.imageSize ?? "1536x1024")
+    };
+    debugLog("OpenAI request payload validated");
+    debugLog("OpenAI request metadata", {
+      endpoint,
+      method: "POST",
+      authorization: "Bearer <redacted>"
+    });
+    debugLog("OpenAI request payload", requestPayload);
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: "gpt-image-1",
-        prompt: compiledPrompt,
-        size: "1024x1024"
-      })
+      body: JSON.stringify(requestPayload)
     });
 
     if (!response.ok) {
+      logImagePipelineError("OpenAI images request failed", {
+        provider,
+        endpoint,
+        status: response.status
+      });
       throw new Error(`OpenAI image request failed (${response.status}).`);
     }
+
+    debugLog("OpenAI response headers", [...response.headers.entries()]);
+    debugLog("OpenAI success response", await response.clone().text());
 
     const payload = await response.json();
     const first = payload?.data?.[0] ?? null;
     const imagePath = first?.b64_json
       ? `data:image/png;base64,${first.b64_json}`
       : (first?.url ?? null);
+    debugLog("OpenAI imagePath received", imagePath);
 
     if (!imagePath) {
+      logImagePipelineError("OpenAI response missing image payload", {
+        provider,
+        endpoint,
+        payloadKeys: Object.keys(payload ?? {})
+      });
       throw new Error("OpenAI response did not include an image payload.");
     }
 
@@ -1288,6 +3449,7 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
       costEstimate
     };
   } catch (error) {
+    logImagePipelineError("OpenAI generation exception", { provider }, error);
     debugLog("OpenAI generation failed", error?.message ?? error);
     return {
       provider,
@@ -1304,7 +3466,6 @@ async function generateOpenAiMapImage(compiledPrompt, options = {}) {
  */
 function promptPaidGenerationConfirmation(compiledPrompt, options = {}) {
   const {
-    estimatedCost = "$0.08 placeholder",
     usageCount = 0,
     usageLimit = 0,
     requireConfirmation = true
@@ -1316,7 +3477,6 @@ function promptPaidGenerationConfirmation(compiledPrompt, options = {}) {
     const dialog = new Dialog({
       title: "Confirm Paid AI Generation",
       content: `
-<p><strong>Estimated Cost:</strong> ${foundry.utils.escapeHTML(estimatedCost)}</p>
 <p><strong>Monthly Usage:</strong> ${usageCount}/${usageLimit}</p>
 <p><strong>Compiled Prompt:</strong></p>
 <pre>${foundry.utils.escapeHTML(compiledPrompt)}</pre>
@@ -1525,7 +3685,7 @@ async function regenerateSceneFromFlags(scene) {
 
   try {
     await generateSceneLayout(scene, generationData, { isRegeneration: true });
-    ui.notifications.info(`SceneForge AI: Regenerated layout for "${scene.name}".`);
+    ui.notifications.info(`SceneForge AI: Cleared SceneForge-generated overlays for "${scene.name}".`);
   } catch (error) {
     console.error(`${MODULE_ID} | Scene regeneration failed`, error);
     ui.notifications.error("SceneForge AI: Failed to regenerate layout. Check browser console.");
@@ -1645,10 +3805,10 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.14.1",
+    version: generationData.moduleVersion ?? "0.21.0",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-image-only",
     prompt: generationData.prompt,
     theme: generationData.theme,
     size: generationData.sceneSizeKey,
@@ -1719,37 +3879,21 @@ function validateImportedPreset(rawPreset) {
   }
 
   const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
-  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "procedural");
+  const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "ai-image-only");
   const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
-  const theme = String(rawPreset.theme ?? rawPreset.generationData?.theme ?? "").trim();
-  const sceneSizeKey = String(rawPreset.size ?? rawPreset.sceneSizeKey ?? rawPreset.generationData?.sceneSizeKey ?? "").trim();
+  const theme = "ai-map";
+  const sceneSizeKey = "medium";
   const seed = String(rawPreset.seed ?? rawPreset.generationData?.seed ?? "").trim();
-  const lightingMood = String(rawPreset.lightingMood ?? rawPreset.generationData?.lightingMood ?? "dim");
+  const lightingMood = "dim";
 
   if (!prompt) return { ok: false, error: "Missing prompt." };
-  if (!Object.prototype.hasOwnProperty.call(THEME_LABELS, theme)) {
-    return { ok: false, error: `Invalid theme "${theme}".` };
-  }
-  if (!Object.prototype.hasOwnProperty.call(SCENE_SIZES, sceneSizeKey)) {
-    return { ok: false, error: `Invalid size "${sceneSizeKey}".` };
-  }
   if (!seed) return { ok: false, error: "Missing seed." };
-  if (!Object.prototype.hasOwnProperty.call(LIGHTING_MOOD_LABELS, lightingMood)) {
-    return { ok: false, error: `Invalid lighting mood "${lightingMood}".` };
-  }
-
-  const detected = rawPreset.detected
-    ?? rawPreset.generationData?.detected
-    ?? parsePromptForSceneSettings(prompt);
-  const aiPlan = rawPreset.aiPlan
-    ?? rawPreset.generationData?.aiPlan
-    ?? (generationMode === "ai-planner" ? parseAiMapPlan(prompt) : null);
-  const layoutGraph = rawPreset.layoutGraph
-    ?? rawPreset.generationData?.layoutGraph
-    ?? (aiPlan ? buildLayoutGraphFromPlan(aiPlan, seed) : null);
   const compiledImagePrompt = rawPreset.compiledImagePrompt
     ?? rawPreset.generationData?.compiledImagePrompt
-    ?? (aiPlan ? compileInkarnatePrompt(aiPlan, layoutGraph) : null);
+    ?? compileInkarnatePrompt(prompt);
+  const detected = null;
+  const aiPlan = null;
+  const layoutGraph = null;
   const imageGeneration = rawPreset.imageGeneration
     ?? rawPreset.generationData?.imageGeneration
     ?? {
@@ -1757,18 +3901,12 @@ function validateImportedPreset(rawPreset) {
       compiledPrompt: compiledImagePrompt ?? "",
       imageStatus: "not-requested",
       imagePath: null,
-      costEstimate: {
-        preview: "$0.00 mock",
-        final: "$0.08 placeholder"
-      }
+      costEstimate: null
     };
 
-  const useDetectedSettings = rawPreset.useDetectedSettings ?? rawPreset.generationData?.useDetectedSettings;
-  const enabledAssetPacks = rawPreset.enabledAssetPacks ?? rawPreset.generationData?.enabledAssetPacks;
-  const baseDetected = (useDetectedSettings !== false) ? detected : buildDisabledDetectedPayload(detected);
-  const effectiveDetected = generationMode === "ai-planner"
-    ? applyAiPlanFeaturesToDetected(baseDetected, aiPlan ?? parseAiMapPlan(prompt))
-    : baseDetected;
+  const useDetectedSettings = false;
+  const enabledAssetPacks = [];
+  const effectiveDetected = null;
 
   const generationData = {
     generationMode,
@@ -1784,11 +3922,9 @@ function validateImportedPreset(rawPreset) {
     compiledImagePrompt,
     imageGeneration,
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
-    generationLayers: Array.isArray(rawPreset.generationLayers)
-      ? rawPreset.generationLayers
-      : ["walls", "floor-assets", "props", "lighting", "notes"],
+    generationLayers: ["background-image"],
     seed,
-    moduleVersion: "0.14.1"
+    moduleVersion: "0.21.0"
   };
 
   return {
@@ -1804,8 +3940,11 @@ function validateImportedPreset(rawPreset) {
 async function importPresetAsNewScene(generationData, sourceVersion = "unknown", options = {}) {
   const { missingPacks = [] } = options;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(generationData.sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = Number(generationData.mapCoverageMeters ?? getMapCoverageMeters(generationData.sceneSizeKey));
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
   const sceneName = `SceneForge Preset - ${formatThemeLabel(generationData.theme)} - ${generationData.seed}`;
 
   const scenePayload = {
@@ -1815,11 +3954,11 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
     padding: 0.1,
     grid: {
       type: CONST.GRID_TYPES.SQUARE,
-      size: GRID_SIZE_PX,
-      distance: 5,
-      units: "ft"
+      size: gridPixelSize,
+      distance: metersPerGrid,
+      units: "m"
     },
-    backgroundColor: "#2b2b2b",
+    backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR,
     navigation: true,
     flags: {
       [MODULE_ID]: {
@@ -1840,7 +3979,7 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
   await generateSceneLayout(scene, generationData);
 
   if (missingPacks.length > 0) {
-    await createMissingPackWarningJournalNote(scene, missingPacks);
+    ui.notifications.warn(`SceneForge AI: Imported preset references missing packs (${missingPacks.join(", ")}).`);
   }
 }
 
@@ -1848,6 +3987,8 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
  * If import proceeds without required packs, drop a warning journal note in scene.
  */
 async function createMissingPackWarningJournalNote(scene, missingPacks) {
+  if (!ENABLE_JOURNALS_AND_NOTES) return;
+
   const content = `
 <h2>SceneForge Import Warning</h2>
 <p>This preset was built with asset packs not currently enabled:</p>
@@ -1930,29 +4071,28 @@ function slugifyFilename(name) {
 }
 
 /**
- * Core generation pipeline used by both first-time generation and regeneration.
- * Steps:
- *   1) Normalize data and update scene dimensions/grid
- *   2) Clear SceneForge-generated content only
- *   3) Build deterministic walls/lights from seed + options
- *   4) Create summary journal and an in-scene note
- *   5) Re-save generation data to scene flags
+ * Legacy regeneration entrypoint.
+ * In image-only mode, it only normalizes scene grid metadata and clears
+ * any previously generated SceneForge overlays (walls/lights/tiles/notes/journals).
  */
 async function generateSceneLayout(scene, generationData, options = {}) {
-  const { isRegeneration = false } = options;
+  void options;
 
   const prompt = String(generationData.prompt ?? "").trim();
-  const sceneSizeKey = String(generationData.sceneSizeKey ?? "medium");
-  const theme = String(generationData.theme ?? "dungeon");
-  const lightingMood = String(generationData.lightingMood ?? "dim");
+  const sceneSizeKey = "medium";
+  const theme = "ai-map";
+  const lightingMood = "dim";
   const seed = String(generationData.seed ?? randomSeedString());
-  const detected = generationData.detected ?? parsePromptForSceneSettings(prompt);
-  const useDetectedSettings = generationData.useDetectedSettings !== false;
-  const effectiveDetected = generationData.effectiveDetected ?? (useDetectedSettings ? detected : buildDisabledDetectedPayload(detected));
+  const detected = null;
+  const useDetectedSettings = false;
+  const effectiveDetected = null;
 
   const gridCells = SCENE_SIZES[sceneSizeKey] ?? SCENE_SIZES.medium;
-  const widthPx = gridCells * GRID_SIZE_PX;
-  const heightPx = gridCells * GRID_SIZE_PX;
+  const gridPixelSize = getSceneGridPixelSize(sceneSizeKey);
+  const widthPx = gridCells * gridPixelSize;
+  const heightPx = gridCells * gridPixelSize;
+  const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
+  const metersPerGrid = Math.max(0.1, mapCoverageMeters / Math.max(1, gridCells));
 
   // Keep scene settings aligned with saved generation options every regeneration.
   await scene.update({
@@ -1960,121 +4100,18 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     height: heightPx,
     grid: {
       type: CONST.GRID_TYPES.SQUARE,
-      size: GRID_SIZE_PX,
-      distance: 5,
-      units: "ft"
-    }
+      size: gridPixelSize,
+      distance: metersPerGrid,
+      units: "m"
+    },
+    backgroundColor: DEFAULT_SCENE_BACKGROUND_COLOR
   });
 
   await clearGeneratedContent(scene);
-
-  // Same seed + same options => same pseudo-random sequence => same layout.
-  const rng = createSeededRng(`${seed}|${theme}|${sceneSizeKey}|${prompt}`);
-
-  const walls = buildThemeWalls(theme, widthPx, heightPx, rng, seed, effectiveDetected);
-  const activePackIds = Array.isArray(generationData.enabledAssetPacks)
-    ? generationData.enabledAssetPacks
-    : getEnabledAssetPackIds();
-  const tileLayers = buildThemeTiles(theme, widthPx, heightPx, walls, rng, seed, effectiveDetected, activePackIds);
-  const mergedTiles = [...tileLayers.floorTiles, ...tileLayers.propTiles];
-  const validatedTiles = await applyTileFallbackModeToTiles(mergedTiles);
-  const lights = buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, effectiveDetected);
-
-  // Generation layers order (premium-style pipeline):
-  // 1) walls
-  // 2) floor assets
-  // 3) props
-  // 4) lighting
-  // 5) notes
-  if (walls.length > 0) {
-    await safeEmbeddedCreate(scene, "Wall", walls, "generateSceneLayout.Wall.createEmbeddedDocuments");
-  }
-
-  if (validatedTiles.length > 0) {
-    await safeEmbeddedCreate(scene, "Tile", validatedTiles, "generateSceneLayout.Tile.createEmbeddedDocuments");
-  }
-
-  if (lights.length > 0) {
-    await safeEmbeddedCreate(scene, "AmbientLight", lights, "generateSceneLayout.AmbientLight.createEmbeddedDocuments");
-  }
-
-  const summaryText = buildPromptSummary(
-    prompt,
-    sceneSizeKey,
-    theme,
-    seed,
-    lightingMood,
-    effectiveDetected,
-    isRegeneration,
-    useDetectedSettings
-  );
-  const journalPayload = {
-    name: `SceneForge Notes - ${scene.name}`,
-    pages: [
-      {
-        name: "Scene Summary",
-        type: "text",
-        text: {
-          format: 1,
-          content: summaryText
-        }
-      }
-    ],
-    flags: {
-      [MODULE_ID]: {
-        [FLAG_GENERATED_KEY]: true,
-        sceneId: scene.id,
-        seed
-      }
-    }
-  };
-  const journal = await safeJournalEntryCreate(journalPayload, "generateSceneLayout.JournalEntry.create");
-
-  const firstPage = journal?.pages?.contents?.[0];
-  if (journal && firstPage) {
-    const notesToCreate = [
-      {
-        x: Math.floor(widthPx * 0.5),
-        y: Math.floor(heightPx * 0.5),
-        entryId: journal.id,
-        pageId: firstPage.id,
-        iconSize: 40,
-        text: "SceneForge Prompt Notes",
-        flags: {
-          [MODULE_ID]: {
-            [FLAG_GENERATED_KEY]: true,
-            kind: "note",
-            seed
-          }
-        }
-      }
-    ];
-
-    // Feature influence: add a treasure note marker when treasure is requested.
-    if (effectiveDetected.features.treasure) {
-      notesToCreate.push({
-        x: Math.floor(widthPx * 0.8),
-        y: Math.floor(heightPx * 0.25),
-        entryId: journal.id,
-        pageId: firstPage.id,
-        iconSize: 36,
-        text: "Treasure Location",
-        flags: {
-          [MODULE_ID]: {
-            [FLAG_GENERATED_KEY]: true,
-            kind: "note",
-            noteType: "treasure",
-            seed
-          }
-        }
-      });
-    }
-
-    await safeEmbeddedCreate(scene, "Note", notesToCreate, "generateSceneLayout.Note.createEmbeddedDocuments");
-  }
+  const generationLayers = ["background-image"];
 
   await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
-    generationMode: generationData.generationMode ?? "procedural",
+    generationMode: generationData.generationMode ?? "ai-image-only",
     prompt,
     sceneSizeKey,
     theme,
@@ -2090,15 +4127,12 @@ async function generateSceneLayout(scene, generationData, options = {}) {
       compiledPrompt: generationData.compiledImagePrompt ?? "",
       imageStatus: "not-requested",
       imagePath: null,
-      costEstimate: {
-        preview: "$0.00 mock",
-        final: "$0.08 placeholder"
-      }
+      costEstimate: null
     },
-    enabledAssetPacks: activePackIds,
-    generationLayers: ["walls", "floor-assets", "props", "lighting", "notes"],
+    enabledAssetPacks: [],
+    generationLayers,
     seed,
-    moduleVersion: "0.14.1",
+    moduleVersion: "0.21.0",
     lastGeneratedAt: Date.now()
   });
 
@@ -2703,6 +4737,18 @@ async function applyTileFallbackModeToTiles(tiles) {
 }
 
 /**
+ * Applies fallback handling to layered tile output from buildThemeTiles.
+ * Keeps layer merge logic separate from source validation.
+ */
+async function applyTileFallbackModeToTileLayers(tileLayers) {
+  if (!tileLayers || typeof tileLayers !== "object") return [];
+  const floorTiles = Array.isArray(tileLayers.floorTiles) ? tileLayers.floorTiles : [];
+  const propTiles = Array.isArray(tileLayers.propTiles) ? tileLayers.propTiles : [];
+  const mergedTiles = [...floorTiles, ...propTiles];
+  return applyTileFallbackModeToTiles(mergedTiles);
+}
+
+/**
  * Keep only tiles whose texture source can be fetched by the client.
  * Missing paths are skipped to avoid Foundry warning triangle icons.
  */
@@ -2879,7 +4925,7 @@ function buildThemeLights(theme, widthPx, heightPx, rng, seed, lightingMood, det
 }
 
 function formatThemeLabel(theme) {
-  return THEME_LABELS[theme] ?? "Dungeon";
+  return THEME_LABELS[theme] ?? "AI Map";
 }
 
 /**
@@ -2887,10 +4933,11 @@ function formatThemeLabel(theme) {
  */
 function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, detected, isRegeneration, useDetectedSettings) {
   const sceneSizeLabel = {
-    small: "Small (30x30)",
-    medium: "Medium (50x50)",
-    large: "Large (70x70)"
-  }[sceneSizeKey] ?? "Medium (50x50)";
+    small: "Small (~50m)",
+    medium: "Medium (~250m)",
+    large: "Large (~800m)",
+    xlarge: "Extra Large (~1 mile)"
+  }[sceneSizeKey] ?? "Medium (~250m)";
   const featureSummary = FEATURE_KEYS
     .filter((key) => detected?.features?.[key])
     .map((key) => formatFeatureLabel(key, detected?.features ?? {}));
@@ -2910,282 +4957,53 @@ function buildPromptSummary(prompt, sceneSizeKey, theme, seed, lightingMood, det
 }
 
 /**
- * Parse an "AI planner" map plan from natural language using local rules only.
- * No external APIs are called.
+ * Build the final image prompt by appending universal quality constraints.
  */
-function parseAiMapPlan(prompt) {
-  const text = String(prompt ?? "").toLowerCase();
-  const has = (phrase) => text.includes(phrase);
-  const matched = (keywords) => keywords.filter((k) => has(k));
+function formatMapScalePromptInstruction(sceneSizeKey, mapCoverageMeters) {
+  const meters = Number.isFinite(Number(mapCoverageMeters)) ? Math.max(1, Math.round(Number(mapCoverageMeters))) : 250;
+  const miles = meters / 1609.344;
+  const milesLabel = miles >= 0.1
+    ? `${miles.toFixed(2)} miles`
+    : `${Math.round(miles * 5280)} feet`;
+  const scaleGuidance = {
+    small: "SMALL SCALE BATTLE MAP COMPOSITION",
+    medium: "LOCAL AREA MAP COMPOSITION WITH MULTIPLE POINTS OF INTEREST",
+    large: "LARGE DISTRICT SCALE COMPOSITION WITH BROAD SPATIAL COVERAGE",
+    xlarge: "REGIONAL SCALE COMPOSITION SHOWING A WIDE AREA ACROSS THE MAP"
+  }[sceneSizeKey] ?? "LOCAL AREA MAP COMPOSITION WITH MULTIPLE POINTS OF INTEREST";
 
-  const matchedBiomes = matched(AI_PLANNER_BIOMES);
-  const matchedThemes = matched(AI_PLANNER_THEMES);
-  const matchedTerrain = matched(AI_PLANNER_TERRAIN_FEATURES);
-  const matchedLighting = matched(AI_PLANNER_LIGHTING_MOODS);
-
-  const biome = matchedBiomes[0] ?? "forest";
-  const themeRoot = matchedThemes[0] ?? "ruins";
-  const theme = `${biome}_${themeRoot}`;
-
-  const roomCountHint = detectCountFromPrompt(text, ["rooms", "room"], 0);
-  const sideRoomCount = detectCountFromPrompt(text, ["side rooms", "side room"], has("side room") ? 2 : 0);
-
-  const rooms = [];
-  if (has("boss room")) {
-    rooms.push({ type: "boss_room", position: detectDirectionalPosition(text, "boss room", "north") });
-  }
-  if (sideRoomCount > 0 || has("side room")) {
-    rooms.push({ type: "side_room", count: Math.max(1, sideRoomCount || 2) });
-  }
-  if (has("hidden room")) {
-    rooms.push({ type: "hidden_room", position: detectDirectionalPosition(text, "hidden room", "east") });
-  }
-  if (has("puzzle room")) {
-    rooms.push({ type: "puzzle_room", position: detectDirectionalPosition(text, "puzzle room", "west") });
-  }
-
-  const baseRoomCount = roomCountHint > 0 ? roomCountHint : 3;
-  const roomCount = Math.max(
-    baseRoomCount,
-    rooms.reduce((sum, room) => sum + (Number(room.count) || 1), 0)
-  );
-
-  const mapSize = roomCount >= 6 || matchedTerrain.length >= 5 ? "large" : (roomCount <= 2 ? "small" : "medium");
-  const estimatedGrid = {
-    small: "30x30",
-    medium: "50x50",
-    large: "70x70"
-  }[mapSize] ?? "50x50";
-
-  const lightingMood = matchedLighting[0] ?? (has("torch") || has("torches") ? "torchlit" : "dim");
-  const terrainFeatures = dedupeKeywords(matchedTerrain);
-  const compositionNotes = buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood });
-
-  return {
-    theme,
-    biome,
-    style: "inkarnate",
-    mapSize,
-    estimatedGrid,
-    roomCount,
-    rooms,
-    terrainFeatures,
-    lightingMood,
-    compositionNotes
-  };
-}
-
-/**
- * Phase 2:
- * Build a deterministic layout graph from AI planner output + seed.
- */
-function buildLayoutGraphFromPlan(plan, seed) {
-  const rng = createSeededRng(`${seed}|layout-graph|${JSON.stringify(plan)}`);
-  const positions = ["north", "east", "west", "south", "center", "north-east", "north-west"];
-  const entrancePosition = ["south", "west", "east"][randomInt(rng, 0, 2)];
-
-  const nodes = [
-    { id: "entrance", type: "entrance", position: entrancePosition },
-    { id: "central_area", type: "central_area", position: "center" }
-  ];
-  const edges = [
-    { from: "entrance", to: "central_area" }
-  ];
-
-  const sidePositionOrder = ["east", "west", "north-east", "north-west", "south-east", "south-west"];
-  let sidePositionIndex = 0;
-
-  for (const room of plan.rooms ?? []) {
-    if (room.type === "side_room") {
-      const count = Math.max(1, Number(room.count) || 1);
-      for (let i = 0; i < count; i += 1) {
-        const position = sidePositionOrder[(sidePositionIndex + i) % sidePositionOrder.length];
-        const id = `side_room_${position.replace(/[^a-z]/g, "_")}_${i + 1}`;
-        nodes.push({ id, type: "side_room", position });
-        edges.push({ from: "central_area", to: id });
-      }
-      sidePositionIndex += count;
-      continue;
-    }
-
-    const baseId = room.type || "room";
-    const id = baseId === "boss_room" ? "boss_room" : `${baseId}_${nodes.length}`;
-    const defaultPosition = baseId === "boss_room" ? "north" : positions[randomInt(rng, 0, positions.length - 1)];
-    const position = room.position ?? defaultPosition;
-    nodes.push({ id, type: baseId, position });
-    edges.push({ from: "central_area", to: id });
-  }
-
-  if (!nodes.some((node) => node.type === "boss_room")) {
-    nodes.push({ id: "boss_room", type: "boss_room", position: "north" });
-    edges.push({ from: "central_area", to: "boss_room" });
-  }
-
-  const terrainAnchors = buildTerrainAnchorsFromPlan(plan, rng);
-
-  return {
-    nodes,
-    edges,
-    terrainAnchors
-  };
-}
-
-/**
- * Convert terrain features into deterministic anchor descriptors for graph + prompt.
- */
-function buildTerrainAnchorsFromPlan(plan, rng) {
-  const anchors = [];
-  const features = plan.terrainFeatures ?? [];
-
-  const riverPathOptions = ["north_south", "east_west", "diagonal"];
-  if (features.includes("river")) {
-    anchors.push({
-      type: "river",
-      path: riverPathOptions[randomInt(rng, 0, riverPathOptions.length - 1)]
-    });
-  }
-  if (features.includes("bridge")) {
-    anchors.push({ type: "bridge", position: "center" });
-  }
-  if (features.includes("waterfall")) {
-    anchors.push({ type: "waterfall", position: "north" });
-  }
-  if (features.includes("lava")) {
-    anchors.push({ type: "lava", path: "south_arc" });
-  }
-  if (features.includes("cliffs")) {
-    anchors.push({ type: "cliffs", position: "map_edges" });
-  }
-  if (features.includes("road")) {
-    anchors.push({ type: "road", path: "entrance_to_center" });
-  }
-  if (features.includes("docks")) {
-    anchors.push({ type: "docks", position: "south_edge" });
-  }
-
-  return anchors;
-}
-
-/**
- * Compile a strict future-facing image prompt using the AI planner output.
- * This is preview-only text now; no external image generation is called.
- */
-function compileInkarnatePrompt(plan, layoutGraph = null) {
-  const roomSummary = plan.rooms.map((room) => {
-    const position = room.position ? ` at ${room.position}` : "";
-    const count = room.count ? ` x${room.count}` : "";
-    return `${room.type}${count}${position}`;
-  }).join(", ");
-
-  const terrainSummary = plan.terrainFeatures.join(", ") || "none";
-  const noteSummary = plan.compositionNotes.join("; ") || "balanced composition";
-  const graphSummary = layoutGraph
-    ? summarizeLayoutGraphForPrompt(layoutGraph)
-    : "layout graph not provided";
-
-  return `
-TRUE TOP DOWN VTT BATTLE MAP.
-90 DEGREE ORTHOGRAPHIC CAMERA.
-GRIDLESS.
-INKARNATE STYLE.
-HIGH DETAIL HAND PAINTED FANTASY MAP.
-NO CHARACTERS.
-NO TEXT.
-NO LABELS.
-NO ISOMETRIC.
-NO PERSPECTIVE CAMERA.
-Biome: ${plan.biome}.
-Theme: ${plan.theme}.
-Map size: ${plan.mapSize} (${plan.estimatedGrid}).
-Lighting mood: ${plan.lightingMood}.
-Rooms: ${roomSummary || "none"}.
-Terrain features: ${terrainSummary}.
-Layout graph: ${graphSummary}.
-Composition: ${noteSummary}.
-  `.trim();
-}
-
-function summarizeLayoutGraphForPrompt(layoutGraph) {
-  const entrance = layoutGraph.nodes.find((node) => node.type === "entrance");
-  const bossRoom = layoutGraph.nodes.find((node) => node.type === "boss_room");
-  const sideRooms = layoutGraph.nodes.filter((node) => node.type === "side_room");
-  const river = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "river");
-  const bridge = layoutGraph.terrainAnchors.find((anchor) => anchor.type === "bridge");
-
-  const parts = [];
-  if (entrance) parts.push(`entrance in ${entrance.position}`);
-  if (bossRoom) parts.push(`boss room in ${bossRoom.position}`);
-  if (sideRooms.length > 0) {
-    const positions = sideRooms.map((room) => room.position).join(" and ");
-    parts.push(`side rooms ${positions}`);
-  }
-  if (river) parts.push(`river runs ${river.path} through center`);
-  if (bridge) parts.push(`bridge crosses river ${bridge.position}`);
-
-  return parts.join("; ") || "central area with branching encounters";
-}
-
-/**
- * Map AI planner theme output into SceneForge's current supported themes.
- */
-function mapAiPlanThemeToSceneTheme(plan) {
-  const themeText = `${plan.theme} ${plan.biome}`.toLowerCase();
-  if (themeText.includes("tavern") || themeText.includes("village") || themeText.includes("camp")) return "tavern";
-  if (themeText.includes("cave") || themeText.includes("underground") || themeText.includes("sewer")) return "cave";
-  if (themeText.includes("forest") || themeText.includes("jungle") || themeText.includes("ruins") || themeText.includes("temple")) return "forest-ruins";
-  return "dungeon";
-}
-
-function mapAiPlanSizeToSceneSizeKey(mapSize) {
-  if (mapSize === "small" || mapSize === "large" || mapSize === "medium") return mapSize;
-  return "medium";
-}
-
-function mapAiPlanLightingToSceneLighting(lightingMood) {
-  if (["bright", "dim", "dark", "magical"].includes(lightingMood)) return lightingMood;
-  if (lightingMood === "torchlit") return "dim";
-  return "dim";
-}
-
-/**
- * Apply AI plan room/terrain hints into existing feature toggles.
- */
-function applyAiPlanFeaturesToDetected(detected, plan) {
-  const clone = foundry.utils.deepClone(detected ?? parsePromptForSceneSettings(""));
-  const roomTypes = (plan.rooms ?? []).map((room) => room.type);
-  const terrain = plan.terrainFeatures ?? [];
-
-  clone.features.bossRoom = clone.features.bossRoom || roomTypes.includes("boss_room");
-  clone.features.hiddenRoom = clone.features.hiddenRoom || roomTypes.includes("hidden_room") || terrain.includes("hidden room");
-  clone.features.sideRooms = clone.features.sideRooms || roomTypes.includes("side_room") || terrain.includes("side rooms");
-  const plannedSideRoom = plan.rooms.find((room) => room.type === "side_room");
-  if (plannedSideRoom?.count) clone.features.sideRoomsCount = Number(plannedSideRoom.count);
-  clone.features.pillars = clone.features.pillars || terrain.includes("pillars");
-  clone.features.altar = clone.features.altar || terrain.includes("altar");
-  clone.features.treasure = clone.features.treasure || terrain.includes("treasure");
-  clone.features.cells = clone.features.cells || terrain.includes("prison cells");
-
-  return clone;
-}
-
-/**
- * Human-readable AI plan bullet summary for preview mode.
- */
-function buildAiPlanReadableSummary(plan) {
-  const terrainSummary = plan.terrainFeatures.length > 0 ? plan.terrainFeatures.join(", ") : "none";
-  const roomSummary = plan.rooms.length > 0
-    ? plan.rooms.map((room) => room.count ? `${room.type} x${room.count}` : room.type).join(", ")
-    : "none";
   return [
-    `Biome: ${plan.biome}`,
-    `Theme: ${plan.theme}`,
-    `Style: ${plan.style}`,
-    `Map Size: ${plan.mapSize} (${plan.estimatedGrid})`,
-    `Room Count: ${plan.roomCount}`,
-    `Lighting Mood: ${plan.lightingMood}`,
-    `Rooms: ${roomSummary}`,
-    `Terrain: ${terrainSummary}`
+    `MAP SCALE TARGET: APPROXIMATELY ${meters} METERS WIDE (${milesLabel})`,
+    scaleGuidance,
+    "FRAME THE ENTIRE MAP AS A WIDE-AREA OVERVIEW, NOT A CLOSE-UP ENCOUNTER SHOT"
   ];
+}
+
+function compileInkarnatePrompt(prompt, options = {}) {
+  const sourcePrompt = String(prompt ?? "").trim();
+  const orientationSpec = getImageOrientationSpec(options.imageOrientation);
+  const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const lines = [
+    sourcePrompt,
+    "TRUE TOP DOWN BATTLE MAP",
+    "90 DEGREE ORTHOGRAPHIC CAMERA",
+    orientationSpec.promptLine,
+    ...scaleLines,
+    "GRIDLESS",
+    "HAND PAINTED INKARNATE STYLE",
+    "CRISP LINEWORK",
+    "SHARP CLEAN EDGES",
+    "HIGH DETAIL TEXTURES",
+    "HIGH CONTRAST COLOR SEPARATION",
+    "VIBRANT READABLE COLORS",
+    "D&D VTT MAP",
+    "NO CHARACTERS",
+    "NO TEXT",
+    "NO LABELS",
+    "NO ISOMETRIC",
+    "NO PERSPECTIVE CAMERA"
+  ];
+  return lines.filter((line) => line.length > 0).join("\n");
 }
 
 function buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood }) {
@@ -3221,92 +5039,23 @@ function detectDirectionalPosition(text, subject, fallback = "center") {
  * No external API calls are made.
  */
 function parsePromptForSceneSettings(prompt) {
-  const text = prompt.toLowerCase();
-  const matchKeywords = (keywords) => keywords.filter((k) => text.includes(k));
-  const hasAny = (keywords) => matchKeywords(keywords).length > 0;
-
-  const themeRules = {
-    tavern: ["tavern", "inn", "bar", "pub", "alehouse"],
-    cave: ["cave", "cavern", "grotto", "underground", "tunnel"],
-    "forest-ruins": ["forest", "ruins", "ruined", "forest temple", "temple", "overgrown", "jungle"],
-    dungeon: ["dungeon", "crypt", "catacomb", "cells", "prison", "fortress"]
+  void prompt;
+  const features = {
+    sideRoomsCount: 0
   };
-
-  const themeMatches = {};
-  const themeScores = {};
-  for (const [themeKey, keywords] of Object.entries(themeRules)) {
-    const matched = matchKeywords(keywords);
-    themeMatches[themeKey] = matched;
-    themeScores[themeKey] = matched.length;
-  }
-
-  const sortedThemes = Object.entries(themeScores).sort((a, b) => b[1] - a[1]);
-  const bestTheme = sortedThemes[0]?.[1] > 0 ? sortedThemes[0][0] : "dungeon";
-
-  const lightingRules = {
-    magical: ["magical", "arcane", "rune", "runes", "glowing sigil", "sigil"],
-    night: ["night", "moonlit", "midnight"],
-    dark: ["dark", "pitch black", "gloom"],
-    bright: ["bright", "sunlit", "well lit"],
-    dim: ["dim", "low light", "shadowy"]
-  };
-
-  let lightingMood = "dim";
-  let matchedLightingKeywords = [];
-  for (const mood of ["magical", "night", "dark", "bright", "dim"]) {
-    const matched = matchKeywords(lightingRules[mood]);
-    if (matched.length > 0) {
-      lightingMood = mood;
-      matchedLightingKeywords = matched;
-      break;
-    }
-  }
-
-  const sideRoomsCount = detectCountFromPrompt(text, ["side room", "side rooms"], 2);
-
-  const featureRules = {
-    bossRoom: ["boss room", "boss chamber", "final chamber", "throne room"],
-    sideRooms: ["side room", "side rooms", "wing", "wings"],
-    storageRoom: ["storage", "storeroom", "supply room", "pantry"],
-    altar: ["altar", "shrine", "sacrificial"],
-    pillars: ["pillar", "pillars", "columns", "column"],
-    hiddenRoom: ["hidden room", "secret room", "secret chamber", "hidden chamber"],
-    treasure: ["treasure", "loot", "hoard", "chest", "vault"],
-    water: ["water", "pool", "river", "stream", "flooded"],
-    traps: ["trap", "traps", "spike", "pitfall", "tripwire"],
-    campfire: ["campfire", "bonfire", "fire pit"],
-    bar: ["bar", "counter", "taproom"],
-    cells: ["cells", "cell block", "prison cell", "jail"]
-  };
-
-  const featureMatchedKeywords = [];
-  const features = { sideRoomsCount };
   for (const key of FEATURE_KEYS) {
-    const matched = matchKeywords(featureRules[key] ?? []);
-    features[key] = matched.length > 0;
-    if (matched.length > 0) {
-      featureMatchedKeywords.push(...matched);
-    }
+    features[key] = false;
   }
-
-  // Keep useful implications for common natural prompts.
-  if (hasAny(["forest temple", "boss room", "boss chamber"])) features.bossRoom = true;
-
-  const enabledFeatureCount = FEATURE_KEYS.reduce((sum, key) => sum + (features[key] ? 1 : 0), 0);
-  let suggestedSize = "medium";
-  if (enabledFeatureCount >= 5) suggestedSize = "large";
-  else if (enabledFeatureCount <= 1) suggestedSize = "small";
-
   return {
-    theme: bestTheme,
-    lightingMood,
+    theme: "ai-map",
+    lightingMood: "dim",
     features,
-    suggestedSize,
-    featureCount: enabledFeatureCount,
+    suggestedSize: "medium",
+    featureCount: 0,
     matchedKeywords: {
-      theme: dedupeKeywords(themeMatches[bestTheme] ?? []),
-      lighting: dedupeKeywords(matchedLightingKeywords),
-      features: dedupeKeywords(featureMatchedKeywords)
+      theme: [],
+      lighting: [],
+      features: []
     }
   };
 }
@@ -3316,9 +5065,10 @@ function parsePromptForSceneSettings(prompt) {
  */
 function formatSceneSizeLabel(sceneSizeKey) {
   const labels = {
-    small: "Small (30x30)",
-    medium: "Medium (50x50)",
-    large: "Large (70x70)"
+    small: "Small (~50m)",
+    medium: "Medium (~250m)",
+    large: "Large (~800m)",
+    xlarge: "Extra Large (~1 mile)"
   };
   return labels[sceneSizeKey] ?? labels.medium;
 }
