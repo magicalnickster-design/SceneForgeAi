@@ -1153,6 +1153,21 @@ function parseDiscordCallbackHash(hashString) {
   };
 }
 
+function parseDiscordRelayWindowName(windowNameValue) {
+  const raw = String(windowNameValue ?? "");
+  const prefix = "sceneforge-discord-linked:";
+  if (!raw.startsWith(prefix)) return null;
+  const encoded = raw.slice(prefix.length);
+  if (!encoded) return null;
+  try {
+    const decoded = decodeURIComponent(encoded);
+    const payload = JSON.parse(decoded);
+    return payload && typeof payload === "object" ? payload : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 async function applyDiscordCallbackPayload(payload, { notify = true } = {}) {
   if (!payload || typeof payload !== "object") return false;
   if (payload.linked) {
@@ -1385,12 +1400,18 @@ async function linkDiscordAccount() {
         })();
       };
       const intervalId = window.setInterval(() => {
-        if (popup.closed) {
-          cleanup();
-          return;
-        }
         try {
           if (handled) return;
+          const relayNamePayload = parseDiscordRelayWindowName(popup.name ?? "");
+          if (relayNamePayload) {
+            handled = true;
+            void (async () => {
+              await applyDiscordCallbackPayload(relayNamePayload, { notify: true });
+              if (!popup.closed) popup.close();
+              cleanup();
+            })();
+            return;
+          }
           const storagePayload = consumeDiscordRelayPayloadFromStorage();
           if (storagePayload) {
             handled = true;
@@ -1411,6 +1432,9 @@ async function linkDiscordAccount() {
           })();
         } catch (_error) {
           // Cross-origin while on Discord; ignore until it returns.
+        }
+        if (popup.closed) {
+          cleanup();
         }
       }, 500);
       const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);

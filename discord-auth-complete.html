@@ -32,6 +32,11 @@
       } catch (_error) {}
 
       try {
+        var encodedPayload = encodeURIComponent(JSON.stringify(payload));
+        window.name = "sceneforge-discord-linked:" + encodedPayload;
+      } catch (_error) {}
+
+      try {
         if (window.opener && !window.opener.closed) {
           window.opener.postMessage({ type: "sceneforge-discord-linked", payload: payload }, window.location.origin);
         }
@@ -41,10 +46,8 @@
       var gameReturnUrl = String(searchParams.get("gameReturnUrl") || "/game");
       window.setTimeout(function () {
         try { window.close(); } catch (_error) {}
-        if (!window.closed) {
-          window.location.assign(gameReturnUrl);
-        }
-      }, 200);
+        if (!window.closed) window.location.assign(gameReturnUrl);
+      }, 1200);
     })();
   </script>
 </body>
