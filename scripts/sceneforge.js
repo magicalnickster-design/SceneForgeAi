@@ -454,17 +454,15 @@ const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
-const SETTING_PATREON_CONNECT_URL = "patreonConnectUrl";
-const SETTING_PATREON_MANAGE_URL = "patreonManageUrl";
 const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
 const SETTING_SUBSCRIPTION_ACCESS_CODE = "subscriptionAccessCode";
+const SETTING_DISCORD_LINK_STATE = "discordLinkState";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
-const DEFAULT_PATREON_CONNECT_URL = "https://sceneforge-backend.onrender.com/api/auth/patreon/connect";
-const DEFAULT_PATREON_MANAGE_URL = "https://www.patreon.com/membership";
+const DEFAULT_DISCORD_CONNECT_PATH = "/api/auth/discord/connect";
 
 /**
  * Base registry ships with the core module.
@@ -574,8 +572,8 @@ async function cleanupLegacyGeneratedJournals() {
 Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
   void enforceProductionSettingsDefaults();
-  void maybeBootstrapPatreonSessionFromUrl();
-  void syncPatreonSubscriptionStatus({ notify: false });
+  void handleDiscordLinkCallbackHash();
+  void syncDiscordSubscriptionStatus({ notify: false });
 });
 
 async function enforceProductionSettingsDefaults() {
@@ -588,16 +586,6 @@ async function enforceProductionSettingsDefaults() {
     const backendUrl = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim();
     if (!backendUrl) {
       await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, DEFAULT_BACKEND_URL);
-    }
-
-    const connectUrl = String(game.settings.get(MODULE_ID, SETTING_PATREON_CONNECT_URL) ?? "").trim();
-    if (!connectUrl) {
-      await game.settings.set(MODULE_ID, SETTING_PATREON_CONNECT_URL, DEFAULT_PATREON_CONNECT_URL);
-    }
-
-    const manageUrl = String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
-    if (!manageUrl) {
-      await game.settings.set(MODULE_ID, SETTING_PATREON_MANAGE_URL, DEFAULT_PATREON_MANAGE_URL);
     }
 
     // Prevent stale direct-provider credentials from creating ambiguity.
@@ -676,29 +664,9 @@ function registerAssetPackSettings() {
     restricted: true
   });
 
-  game.settings.register(MODULE_ID, SETTING_PATREON_CONNECT_URL, {
-    name: "Patreon Connect URL",
-    hint: "URL users open to link Patreon for active subscription access.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: DEFAULT_PATREON_CONNECT_URL,
-    restricted: true
-  });
-
-  game.settings.register(MODULE_ID, SETTING_PATREON_MANAGE_URL, {
-    name: "Patreon Manage URL",
-    hint: "URL users open to manage subscription status.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: DEFAULT_PATREON_MANAGE_URL,
-    restricted: true
-  });
-
   game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN, {
-    name: "Subscription Session Token",
-    hint: "Per-user token issued by your backend after Patreon linking.",
+    name: "Legacy Subscription Session Token",
+    hint: "Legacy fallback token from previous auth flow.",
     scope: "client",
     config: false,
     type: String,
@@ -708,11 +676,30 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE, {
     name: "Subscription Access Code",
-    hint: "Temporary fallback access code while Patreon token support is being finalized.",
+    hint: "Legacy fallback access code.",
     scope: "client",
-    config: true,
+    config: false,
     type: String,
     default: "",
+    restricted: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_DISCORD_LINK_STATE, {
+    name: "Discord Link State",
+    scope: "client",
+    config: false,
+    type: Object,
+    default: {
+      linked: false,
+      token: "",
+      tier: "",
+      monthlyGenerationLimit: 0,
+      discordUserId: "",
+      expiresAt: "",
+      lastLinkedAt: "",
+      lastError: "",
+      lastMessage: ""
+    },
     restricted: false
   });
 
@@ -875,20 +862,45 @@ function getSubscriptionBackendUrl() {
   return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
 }
 
-function getPatreonConnectUrl() {
-  return String(game.settings.get(MODULE_ID, SETTING_PATREON_CONNECT_URL) ?? "").trim();
-}
-
-function getPatreonManageUrl() {
-  return String(game.settings.get(MODULE_ID, SETTING_PATREON_MANAGE_URL) ?? "").trim();
-}
-
 function getSubscriptionAuthToken() {
-  const token = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
-  if (token) return token;
-  const accessCode = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_ACCESS_CODE) ?? "").trim();
-  if (accessCode === EARLY_ACCESS_SUBSCRIPTION_CODE) return accessCode;
+  const discordState = getDiscordLinkState();
+  if (discordState.token) return discordState.token;
+  const legacyToken = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
+  if (legacyToken) return legacyToken;
   return "";
+}
+
+function getDiscordLinkState() {
+  const fallback = {
+    linked: false,
+    token: "",
+    tier: "",
+    monthlyGenerationLimit: 0,
+    discordUserId: "",
+    expiresAt: "",
+    lastLinkedAt: "",
+    lastError: "",
+    lastMessage: ""
+  };
+  const value = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE);
+  if (!value || typeof value !== "object") return fallback;
+  return { ...fallback, ...value };
+}
+
+async function setDiscordLinkState(patch = {}) {
+  const nextState = {
+    ...getDiscordLinkState(),
+    ...(patch && typeof patch === "object" ? patch : {})
+  };
+  await game.settings.set(MODULE_ID, SETTING_DISCORD_LINK_STATE, nextState);
+  return nextState;
+}
+
+function hasLegacyTokenForMigrationNotice() {
+  const legacyToken = String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_AUTH_TOKEN) ?? "").trim();
+  if (!legacyToken) return false;
+  const discordState = getDiscordLinkState();
+  return !String(discordState.token ?? "").trim();
 }
 
 function getSubscriptionAccountState() {
@@ -942,21 +954,19 @@ function getImageOrientationSpec(imageOrientationKey) {
   return IMAGE_ORIENTATION_SPECS[imageOrientationKey] ?? IMAGE_ORIENTATION_SPECS.landscape;
 }
 
-function getPatreonLinkEndpoint() {
-  const connectUrl = getPatreonConnectUrl();
-  if (connectUrl) return connectUrl;
+function getDiscordLinkEndpoint() {
   const backend = getSubscriptionBackendUrl();
   if (!backend) return "";
-  return `${backend}/api/auth/patreon/connect`;
+  return `${backend}${DEFAULT_DISCORD_CONNECT_PATH}`;
 }
 
-function buildPatreonLinkUrl() {
-  const endpoint = getPatreonLinkEndpoint();
+function buildDiscordLinkUrl(returnUrl) {
+  const endpoint = getDiscordLinkEndpoint();
   if (!endpoint) return "";
   try {
     const url = new URL(endpoint, window.location.origin);
     url.searchParams.set("source", MODULE_ID);
-    url.searchParams.set("returnUrl", window.location.href);
+    url.searchParams.set("returnUrl", returnUrl);
     return url.toString();
   } catch (_error) {
     return endpoint;
@@ -1034,7 +1044,74 @@ function normalizeSubscriptionStatusPayload(payload) {
   };
 }
 
-async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
+function parseDiscordCallbackHash(hashString) {
+  const rawHash = String(hashString ?? "").trim();
+  if (!rawHash || !rawHash.startsWith("#")) return null;
+  const params = new URLSearchParams(rawHash.slice(1));
+  if (!params.has("linked")) return null;
+  return {
+    linked: String(params.get("linked") ?? "").trim().toLowerCase() === "true",
+    token: String(params.get("token") ?? "").trim(),
+    tier: String(params.get("tier") ?? "").trim(),
+    monthlyGenerationLimit: Number(params.get("monthlyGenerationLimit") ?? 0),
+    discordUserId: String(params.get("discordUserId") ?? "").trim(),
+    expiresAt: String(params.get("expiresAt") ?? "").trim(),
+    error: String(params.get("error") ?? "").trim(),
+    message: String(params.get("message") ?? "").trim()
+  };
+}
+
+async function applyDiscordCallbackPayload(payload, { notify = true } = {}) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.linked) {
+    if (!payload.token) {
+      if (notify) ui.notifications.error("SceneForge AI: Discord link callback was missing token.");
+      return false;
+    }
+    await setDiscordLinkState({
+      linked: true,
+      token: payload.token,
+      tier: payload.tier || "tier1",
+      monthlyGenerationLimit: Number.isFinite(payload.monthlyGenerationLimit) ? Math.max(0, payload.monthlyGenerationLimit) : 0,
+      discordUserId: payload.discordUserId || "",
+      expiresAt: payload.expiresAt || "",
+      lastLinkedAt: new Date().toISOString(),
+      lastError: "",
+      lastMessage: payload.message || ""
+    });
+    // Maintain one-release fallback compatibility for older code paths.
+    await setSubscriptionAuthToken(payload.token);
+    if (notify) ui.notifications.info("SceneForge AI: Discord linked successfully.");
+    return true;
+  }
+
+  const message = payload.message || payload.error || "Discord link failed.";
+  const currentState = getDiscordLinkState();
+  await setDiscordLinkState({
+    ...currentState,
+    linked: false,
+    lastError: payload.error || "discord_link_failed",
+    lastMessage: message
+  });
+  if (notify) ui.notifications.error(`SceneForge AI: ${message}`);
+  return false;
+}
+
+async function handleDiscordLinkCallbackHash() {
+  try {
+    const currentUrl = new URL(window.location.href);
+    const payload = parseDiscordCallbackHash(currentUrl.hash);
+    if (!payload) return false;
+    await applyDiscordCallbackPayload(payload, { notify: true });
+    currentUrl.hash = "";
+    history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}`);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
   const backendBaseUrl = getSubscriptionBackendUrl();
   debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   if (!backendBaseUrl) {
@@ -1058,7 +1135,7 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
       usageLimit: 0,
       resetAt: null
     });
-    if (notify) ui.notifications.warn("SceneForge AI: Patreon is not linked yet.");
+    if (notify) ui.notifications.warn("SceneForge AI: Please link Discord first.");
     return { ok: false, reason: "missing-token" };
   }
 
@@ -1075,6 +1152,16 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
         await setSubscriptionAuthToken("");
+        await setDiscordLinkState({
+          linked: false,
+          token: "",
+          tier: "",
+          monthlyGenerationLimit: 0,
+          discordUserId: "",
+          expiresAt: "",
+          lastError: "unauthorized",
+          lastMessage: "Discord session expired. Please relink Discord."
+        });
         await setSubscriptionAccountState({
           linked: false,
           active: false,
@@ -1090,67 +1177,73 @@ async function syncPatreonSubscriptionStatus({ notify = false } = {}) {
           resetAt: null
         });
       }
-      if (notify) ui.notifications.error("SceneForge AI: Failed to sync Patreon subscription status.");
+      if (notify) ui.notifications.error("SceneForge AI: Failed to sync Discord subscription status.");
       return { ok: false, reason: `http-${response.status}`, payload };
     }
 
     const refreshedToken = extractSubscriptionTokenFromPayload(payload);
     if (refreshedToken && refreshedToken !== token) {
       await setSubscriptionAuthToken(refreshedToken);
+      await setDiscordLinkState({ token: refreshedToken, linked: true });
     }
 
     const normalized = normalizeSubscriptionStatusPayload(payload);
     const state = await setSubscriptionAccountState(normalized);
+    await setDiscordLinkState({
+      linked: true,
+      tier: normalized.tier ?? "",
+      monthlyGenerationLimit: Number(normalized.usageLimit ?? 0),
+      discordUserId: String(payload?.discordUserId ?? payload?.user?.id ?? payload?.accountId ?? ""),
+      expiresAt: String(payload?.expiresAt ?? payload?.subscription?.expiresAt ?? ""),
+      lastError: "",
+      lastMessage: ""
+    });
     if (notify) {
       const remaining = Math.max(0, state.usageLimit - state.usageCount);
       const remainingLabel = state.unlimitedGenerations ? "Unlimited" : String(remaining);
-      ui.notifications.info(`SceneForge AI: Patreon synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
+      ui.notifications.info(`SceneForge AI: Discord synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
     }
     return { ok: true, state, payload };
   } catch (error) {
     logImagePipelineError("subscription status sync failed", { endpoint }, error);
-    if (notify) ui.notifications.error("SceneForge AI: Could not sync Patreon status.");
+    if (notify) ui.notifications.error("SceneForge AI: Could not sync Discord status.");
     return { ok: false, reason: "network-error", error };
   }
 }
 
-async function maybeBootstrapPatreonSessionFromUrl() {
-  try {
-    const currentUrl = new URL(window.location.href);
-    const token = String(
-      currentUrl.searchParams.get("sceneforgeToken")
-      ?? currentUrl.searchParams.get("subscriptionToken")
-      ?? currentUrl.searchParams.get("token")
-      ?? ""
-    ).trim();
-    if (!token) return false;
-    await setSubscriptionAuthToken(token);
-    currentUrl.searchParams.delete("sceneforgeToken");
-    currentUrl.searchParams.delete("subscriptionToken");
-    currentUrl.searchParams.delete("token");
-    history.replaceState({}, document.title, currentUrl.toString());
-    ui.notifications.info("SceneForge AI: Patreon linked successfully.");
-    return true;
-  } catch (_error) {
-    return false;
+async function linkDiscordAccount() {
+  const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  const endpoint = buildDiscordLinkUrl(returnUrl);
+  const connectEndpoint = endpoint || "";
+  let linkUrl = connectEndpoint;
+  if (connectEndpoint) {
+    try {
+      const connectResponse = await fetch(connectEndpoint, {
+        method: "GET",
+        headers: { Accept: "application/json" }
+      });
+      const payload = await connectResponse.json().catch(() => ({}));
+      if (connectResponse.ok) {
+        linkUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? connectEndpoint).trim();
+      }
+    } catch (_error) {
+      // Fallback to direct endpoint redirect flow.
+      linkUrl = connectEndpoint;
+    }
   }
-}
-
-async function linkPatreonAccount() {
-  const linkUrl = buildPatreonLinkUrl();
   if (!linkUrl) {
-    ui.notifications.error("SceneForge AI: Patreon Connect URL is not configured.");
+    ui.notifications.error("SceneForge AI: Discord connect endpoint is not configured.");
     return;
   }
 
-  const popup = window.open(linkUrl, "sceneforge-patreon-link", "popup=yes,width=620,height=820");
+  const popup = window.open(linkUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
   if (!popup) {
-    ui.notifications.warn("SceneForge AI: Popup was blocked. Opening Patreon connect in a new tab.");
-    window.open(linkUrl, "_blank", "noopener");
+    ui.notifications.warn("SceneForge AI: Popup was blocked. Redirecting to Discord link flow.");
+    window.location.assign(linkUrl);
     return;
   }
 
-  ui.notifications.info("SceneForge AI: Complete Patreon sign-in in the popup. Sync will run automatically after link.");
+  ui.notifications.info("SceneForge AI: Complete Discord sign-in in the popup. Status will sync automatically.");
 
   await new Promise((resolve) => {
     let resolved = false;
@@ -1164,23 +1257,26 @@ async function linkPatreonAccount() {
       }
     };
 
-    const onMessage = async (event) => {
-      const data = event?.data;
-      if (!data || typeof data !== "object") return;
-      if (data.type !== "sceneforge-patreon-linked") return;
-      const token = extractSubscriptionTokenFromPayload(data);
-      if (token) await setSubscriptionAuthToken(token);
-      cleanup();
-    };
-
     const intervalId = window.setInterval(() => {
-      if (popup.closed) cleanup();
+      if (popup.closed) {
+        cleanup();
+        return;
+      }
+      try {
+        const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
+        if (hashPayload) {
+          void applyDiscordCallbackPayload(hashPayload, { notify: true });
+          popup.close();
+          cleanup();
+        }
+      } catch (_error) {
+        // Cross-origin while on Discord; ignore until redirected back.
+      }
     }, 500);
     const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
-    window.addEventListener("message", onMessage);
   });
 
-  await syncPatreonSubscriptionStatus({ notify: true });
+  await syncDiscordSubscriptionStatus({ notify: true });
 }
 
 function formatLinkedAccountLabel(state) {
@@ -1190,8 +1286,23 @@ function formatLinkedAccountLabel(state) {
   if (name && email) return `${name} (${email})`;
   if (name) return name;
   if (email) return email;
-  if (accountId) return `Patreon ID ${accountId}`;
-  return "Unknown Patreon account";
+  if (accountId) return `Discord user ${accountId}`;
+  return "Unknown Discord account";
+}
+
+function maskSensitiveValue(value, edgeChars = 2) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (normalized.length <= edgeChars * 2) return "*".repeat(normalized.length);
+  return `${normalized.slice(0, edgeChars)}***${normalized.slice(-edgeChars)}`;
+}
+
+function formatDisplayDate(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  const timestamp = Date.parse(normalized);
+  if (!Number.isFinite(timestamp)) return normalized;
+  return new Date(timestamp).toLocaleString();
 }
 
 function isGlobalLibraryOnlyModeEnabled() {
@@ -1771,49 +1882,58 @@ Hooks.on("getDocumentContextOptions", (...args) => {
 Hooks.on("renderSettingsConfig", (_app, html) => {
   const rootElement = getHtmlElement(html);
   if (!rootElement) return;
-  if (rootElement.querySelector(".sceneforge-patreon-actions")) return;
+  if (rootElement.querySelector(".sceneforge-discord-actions")) return;
 
-  const accessCodeInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_SUBSCRIPTION_ACCESS_CODE}"]`);
-  const anchorGroup = accessCodeInput?.closest(".form-group");
+  const anchorInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_RUNE_RUINS_PACK}"]`);
+  const anchorGroup = anchorInput?.closest(".form-group");
   if (!anchorGroup) return;
 
   const state = getSubscriptionAccountState();
-  const remaining = state.unlimitedGenerations
-    ? Number.POSITIVE_INFINITY
-    : Math.max(0, Number(state.usageLimit ?? 0) - Number(state.usageCount ?? 0));
-  const linkedAccount = formatLinkedAccountLabel(state);
-  const linkedLine = state.linked
-    ? `Linked as: ${linkedAccount}`
-    : "Linked as: Not linked";
-  const ownerSuffix = state.isOwner ? " (Owner)" : "";
-  const tierLine = `Tier: ${state.linked ? (state.tier || "unknown") : "none"}${ownerSuffix}`;
-  const usageLine = state.unlimitedGenerations
-    ? `Monthly usage: ${state.usageCount ?? 0} / Unlimited`
-    : `Monthly usage: ${state.usageCount ?? 0}/${state.usageLimit ?? 0} (Remaining: ${remaining})`;
+  const discordState = getDiscordLinkState();
+  const tierValue = String(discordState.tier || state.tier || "none").toLowerCase();
+  const tierLabel =
+    tierValue === "founder" ? "Founder"
+      : tierValue === "tier2" ? "Tier 2"
+        : tierValue === "tier1" ? "Tier 1"
+          : "None";
+  const monthlyLimit = Number(discordState.monthlyGenerationLimit || state.usageLimit || 0);
+  const maskedDiscordId = maskSensitiveValue(discordState.discordUserId, 3);
+  const expiresAtLabel = formatDisplayDate(discordState.expiresAt);
+  const linkedLine = `Linked: ${discordState.linked ? "Yes" : "No"}`;
+  const tierLine = `Tier: ${tierLabel}`;
+  const monthlyLine = `Monthly limit: ${monthlyLimit > 0 ? monthlyLimit : "Unknown"}`;
+  const expiresLine = `Expiration: ${expiresAtLabel || "Not provided"}`;
+  const discordLine = `Discord user: ${maskedDiscordId || "Not provided"}`;
+  const migrationNotice = hasLegacyTokenForMigrationNotice()
+    ? `<div style="margin-top:6px;"><strong>Legacy token detected; please relink Discord.</strong></div>`
+    : "";
 
   const actions = document.createElement("div");
-  actions.className = "form-group sceneforge-patreon-actions";
+  actions.className = "form-group sceneforge-discord-actions";
   actions.innerHTML = `
-    <label>Patreon</label>
+    <label>Discord Authentication</label>
     <div class="form-fields">
-      <button type="button" class="sceneforge-link-patreon"><i class="fas fa-link"></i> Link Patreon</button>
-      <button type="button" class="sceneforge-sync-patreon"><i class="fas fa-rotate"></i> Sync Subscription</button>
+      <button type="button" class="sceneforge-link-discord"><i class="fas fa-link"></i> ${discordState.linked ? "Relink Discord" : "Link Discord"}</button>
+      <button type="button" class="sceneforge-sync-discord"><i class="fas fa-rotate"></i> Sync Subscription</button>
     </div>
-    <div class="notes sceneforge-patreon-status" style="margin-top:6px; line-height:1.4;">
+    <div class="notes sceneforge-discord-status" style="margin-top:6px; line-height:1.4;">
       <div><strong>${foundry.utils.escapeHTML(linkedLine)}</strong></div>
       <div>${foundry.utils.escapeHTML(tierLine)}</div>
-      <div>${foundry.utils.escapeHTML(usageLine)}</div>
+      <div>${foundry.utils.escapeHTML(monthlyLine)}</div>
+      <div>${foundry.utils.escapeHTML(expiresLine)}</div>
+      <div>${foundry.utils.escapeHTML(discordLine)}</div>
+      ${migrationNotice}
     </div>
   `;
   anchorGroup.after(actions);
 
-  const linkButton = actions.querySelector(".sceneforge-link-patreon");
-  const syncButton = actions.querySelector(".sceneforge-sync-patreon");
+  const linkButton = actions.querySelector(".sceneforge-link-discord");
+  const syncButton = actions.querySelector(".sceneforge-sync-discord");
   linkButton?.addEventListener("click", async () => {
-    await linkPatreonAccount();
+    await linkDiscordAccount();
   });
   syncButton?.addEventListener("click", async () => {
-    await syncPatreonSubscriptionStatus({ notify: true });
+    await syncDiscordSubscriptionStatus({ notify: true });
   });
 });
 
@@ -2948,31 +3068,26 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   }
 
   if (!token) {
-    const connectUrl = getPatreonConnectUrl();
+    const connectUrl = getDiscordLinkEndpoint();
     logImagePipelineError("subscription auth token missing", { provider, connectUrl });
     return {
       provider,
       imageStatus: "failed",
       imagePath: null,
       costEstimate,
-      errorMessage: connectUrl
-        ? `Subscription token missing. Link Patreon first: ${connectUrl}`
-        : "Subscription token missing. Link Patreon first."
+      errorMessage: "Please link Discord first."
     };
   }
 
-  const subscriptionSync = await syncPatreonSubscriptionStatus({ notify: false });
+  const subscriptionSync = await syncDiscordSubscriptionStatus({ notify: false });
   const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
   if (subscriptionSync.ok && subscriptionState.active === false) {
-    const manageUrl = getPatreonManageUrl();
     return {
       provider,
       imageStatus: "failed",
       imagePath: null,
       costEstimate,
-      errorMessage: manageUrl
-        ? `Patreon subscription is inactive. Manage subscription: ${manageUrl}`
-        : "Patreon subscription is inactive."
+      errorMessage: "Subscription is inactive. Please relink Discord."
     };
   }
   if (
@@ -3021,22 +3136,32 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const backendMessage = String(payload?.error ?? payload?.message ?? "");
+      const quotaErrorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").toLowerCase();
+      if (quotaErrorCode === "quota_exceeded") {
+        const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? subscriptionState?.monthKey ?? "").trim();
+        const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? subscriptionState?.usageLimit ?? 0);
+        const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? subscriptionState?.usageCount ?? usageLimit);
+        const monthLabel = monthKey || "this month";
+        return {
+          provider,
+          imageStatus: "failed",
+          imagePath: null,
+          costEstimate,
+          errorMessage: `Monthly quota exceeded for ${monthLabel}: ${usageCount}/${usageLimit}.`
+        };
+      }
       if (response.status === 401 || response.status === 403) {
-        const manageUrl = getPatreonManageUrl();
         logImagePipelineError("subscription backend unauthorized", {
           provider,
           status: response.status,
-          backendMessage,
-          manageUrl
+          backendMessage
         });
         return {
           provider,
           imageStatus: "failed",
           imagePath: null,
           costEstimate,
-          errorMessage: manageUrl
-            ? `Subscription access denied. Verify Patreon status: ${manageUrl}`
-            : "Subscription access denied. Verify Patreon status."
+          errorMessage: "Subscription access denied. Please relink Discord."
         };
       }
       logImagePipelineError("subscription backend request failed", {
