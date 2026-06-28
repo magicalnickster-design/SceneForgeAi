@@ -1072,8 +1072,24 @@ function extractSubscriptionTokenFromPayload(payload) {
 }
 
 function normalizeSubscriptionStatusPayload(payload) {
-  const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? payload?.monthlyLimit ?? 0);
-  const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? payload?.usedThisMonth ?? 0);
+  const usageLimit = Number(
+    payload?.usageLimit
+    ?? payload?.usage?.limit
+    ?? payload?.monthlyGenerationLimit
+    ?? payload?.monthlyLimit
+    ?? 0
+  );
+  const usageCount = Number(
+    payload?.usageCount
+    ?? payload?.usage?.used
+    ?? payload?.monthlyGenerationUsed
+    ?? payload?.usedThisMonth
+    ?? (
+      Number.isFinite(Number(payload?.remainingThisMonth))
+      ? Math.max(0, usageLimit - Number(payload?.remainingThisMonth))
+      : 0
+    )
+  );
   const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? getCurrentUsageMonthKey());
   const tier = String(payload?.tier ?? payload?.subscription?.tier ?? payload?.plan ?? "none");
   const accountName = String(
