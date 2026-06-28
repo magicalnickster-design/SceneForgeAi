@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SceneForge Discord Link Complete</title>
+</head>
+<body>
+  <p>Completing Discord link for SceneForge AI...</p>
+  <script>
+    (function () {
+      var STORAGE_KEY = "sceneforge-ai.discordRelayPayload";
+      var hash = String(window.location.hash || "");
+      var params = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+      if (!params.has("linked")) {
+        return;
+      }
+
+      var payload = {
+        linked: String(params.get("linked") || "").toLowerCase() === "true",
+        token: String(params.get("token") || ""),
+        tier: String(params.get("tier") || ""),
+        monthlyGenerationLimit: Number(params.get("monthlyGenerationLimit") || 0),
+        discordUserId: String(params.get("discordUserId") || ""),
+        expiresAt: String(params.get("expiresAt") || ""),
+        error: String(params.get("error") || ""),
+        message: String(params.get("message") || "")
+      };
+
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch (_error) {}
+
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({ type: "sceneforge-discord-linked", payload: payload }, window.location.origin);
+        }
+      } catch (_error) {}
+
+      var searchParams = new URLSearchParams(window.location.search || "");
+      var gameReturnUrl = String(searchParams.get("gameReturnUrl") || "/game");
+      window.setTimeout(function () {
+        try { window.close(); } catch (_error) {}
+        if (!window.closed) {
+          window.location.assign(gameReturnUrl);
+        }
+      }, 200);
+    })();
+  </script>
+</body>
+</html>

@@ -465,6 +465,7 @@ const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_DISCORD_CONNECT_PATH = "/api/auth/discord/connect";
+const DISCORD_RELAY_STORAGE_KEY = `${MODULE_ID}.discordRelayPayload`;
 let DISCORD_LINK_IN_PROGRESS = false;
 
 /**
@@ -576,6 +577,7 @@ Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
   void enforceProductionSettingsDefaults();
   void migrateLegacyDiscordStateToUserFlag();
+  void maybeApplyDiscordRelayPayloadFromStorage();
   void handleDiscordLinkCallbackHash();
   void syncDiscordSubscriptionStatus({ notify: false });
 });
@@ -1033,6 +1035,36 @@ function buildDiscordLinkUrl(returnUrl) {
   }
 }
 
+function getDiscordRelayReturnUrl() {
+  const gameReturnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  try {
+    const relayUrl = new URL(`modules/${MODULE_ID}/discord-auth-complete.html`, window.location.origin);
+    relayUrl.searchParams.set("gameReturnUrl", gameReturnUrl);
+    return relayUrl.toString();
+  } catch (_error) {
+    return gameReturnUrl;
+  }
+}
+
+function consumeDiscordRelayPayloadFromStorage() {
+  try {
+    const raw = localStorage.getItem(DISCORD_RELAY_STORAGE_KEY);
+    if (!raw) return null;
+    localStorage.removeItem(DISCORD_RELAY_STORAGE_KEY);
+    const payload = JSON.parse(raw);
+    return payload && typeof payload === "object" ? payload : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function maybeApplyDiscordRelayPayloadFromStorage() {
+  const payload = consumeDiscordRelayPayloadFromStorage();
+  if (!payload) return false;
+  await applyDiscordCallbackPayload(payload, { notify: true });
+  return true;
+}
+
 function extractSubscriptionTokenFromPayload(payload) {
   if (!payload || typeof payload !== "object") return "";
   const token = payload.subscriptionToken ?? payload.authToken ?? payload.token ?? payload.accessToken ?? "";
@@ -1280,7 +1312,7 @@ async function linkDiscordAccount() {
     return;
   }
   DISCORD_LINK_IN_PROGRESS = true;
-  const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  const returnUrl = getDiscordRelayReturnUrl();
   const connectEndpoint = buildDiscordLinkUrl(returnUrl);
   try {
     if (!connectEndpoint) {
@@ -1359,6 +1391,16 @@ async function linkDiscordAccount() {
         }
         try {
           if (handled) return;
+          const storagePayload = consumeDiscordRelayPayloadFromStorage();
+          if (storagePayload) {
+            handled = true;
+            void (async () => {
+              await applyDiscordCallbackPayload(storagePayload, { notify: true });
+              popup.close();
+              cleanup();
+            })();
+            return;
+          }
           const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
           if (!hashPayload) return;
           handled = true;
