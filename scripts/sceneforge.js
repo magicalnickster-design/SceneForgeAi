@@ -1310,13 +1310,21 @@ async function linkDiscordAccount() {
       authUrl = connectEndpoint;
     }
 
-    const popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
+    let popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
     if (!popup || popup.closed) {
-      ui.notifications.warn("SceneForge AI: Could not open Discord auth window in Foundry. Please allow in-app popups.");
+      popup = window.open(authUrl, "sceneforge-discord-link");
+    } else {
+      popup.location.href = authUrl;
+    }
+    if (!popup || popup.closed) {
+      popup = window.open(authUrl, "_blank");
+    }
+    if (!popup || popup.closed) {
+      ui.notifications.info("SceneForge AI: Redirecting this Foundry client to Discord authorization...");
+      window.location.assign(authUrl);
       return;
     }
 
-    popup.location.href = authUrl;
     ui.notifications.info("SceneForge AI: Complete Discord sign-in in the auth window.");
 
     await new Promise((resolve) => {
