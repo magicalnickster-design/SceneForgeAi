@@ -3331,6 +3331,19 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const backendMessage = String(payload?.error ?? payload?.message ?? "");
+      const backendDetail = String(
+        payload?.detail
+        ?? payload?.reason
+        ?? payload?.backendMessage
+        ?? payload?.providerError
+        ?? payload?.upstreamError
+        ?? payload?.error_description
+        ?? ""
+      ).trim();
+      const backendCombinedMessage = [backendMessage, backendDetail]
+        .map((part) => String(part ?? "").trim())
+        .filter((part, index, arr) => part && arr.indexOf(part) === index)
+        .join(" - ");
       const quotaErrorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").toLowerCase();
       if (quotaErrorCode === "quota_exceeded") {
         const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? subscriptionState?.monthKey ?? "").trim();
@@ -3349,7 +3362,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         logImagePipelineError("subscription backend unauthorized", {
           provider,
           status: response.status,
-          backendMessage
+          backendMessage: backendCombinedMessage || backendMessage
         });
         return {
           provider,
@@ -3362,14 +3375,15 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       logImagePipelineError("subscription backend request failed", {
         provider,
         status: response.status,
-        backendMessage
+        backendMessage: backendCombinedMessage || backendMessage,
+        payload
       });
       return {
         provider,
         imageStatus: "failed",
         imagePath: null,
         costEstimate,
-        errorMessage: backendMessage || `Subscription backend request failed (${response.status}).`
+        errorMessage: backendCombinedMessage || `Subscription backend request failed (${response.status}).`
       };
     }
 
