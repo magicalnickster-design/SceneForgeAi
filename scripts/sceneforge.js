@@ -458,6 +458,7 @@ const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
 const SETTING_SUBSCRIPTION_AUTH_TOKEN = "subscriptionAuthToken";
 const SETTING_SUBSCRIPTION_ACCESS_CODE = "subscriptionAccessCode";
 const SETTING_DISCORD_LINK_STATE = "discordLinkState";
+const SETTING_DISCORD_LINK_STATE_BY_USER = "discordLinkStateByUser";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
@@ -582,12 +583,20 @@ Hooks.once("ready", () => {
 async function migrateLegacyDiscordStateToUserFlag() {
   if (!game.user?.setFlag || !game.settings?.get) return;
   try {
+    const currentUserId = String(game.user?.id ?? "").trim();
+    const perUserStateMap = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER) ?? {};
+    const existingMapEntry = currentUserId ? perUserStateMap?.[currentUserId] : null;
     const existingFlag = game.user.getFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE);
-    if (existingFlag && typeof existingFlag === "object" && String(existingFlag.token ?? "").trim()) return;
+    const existingToken = String(existingMapEntry?.token ?? existingFlag?.token ?? "").trim();
+    if (existingToken) return;
     const legacyState = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE);
     if (!legacyState || typeof legacyState !== "object") return;
     const legacyToken = String(legacyState.token ?? "").trim();
     if (!legacyToken) return;
+    if (currentUserId && game.user?.isGM) {
+      const nextMap = { ...perUserStateMap, [currentUserId]: legacyState };
+      await game.settings.set(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER, nextMap);
+    }
     await game.user.setFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE, legacyState);
   } catch (_error) {
     // Non-blocking migration; safe to ignore.
@@ -719,6 +728,15 @@ function registerAssetPackSettings() {
       lastMessage: ""
     },
     restricted: false
+  });
+
+  game.settings.register(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER, {
+    name: "Discord Link State (By User)",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {},
+    restricted: true
   });
 
   game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_ACCOUNT_STATE, {
@@ -900,6 +918,14 @@ function getDiscordLinkState() {
     lastError: "",
     lastMessage: ""
   };
+  const currentUserId = String(game.user?.id ?? "").trim();
+  if (currentUserId) {
+    const perUserStateMap = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER);
+    const perUserState = perUserStateMap?.[currentUserId];
+    if (perUserState && typeof perUserState === "object") {
+      return { ...fallback, ...perUserState };
+    }
+  }
   const userState = game.user?.getFlag?.(MODULE_ID, FLAG_DISCORD_LINK_STATE);
   if (userState && typeof userState === "object") {
     return { ...fallback, ...userState };
@@ -916,6 +942,12 @@ async function setDiscordLinkState(patch = {}) {
     ...getDiscordLinkState(),
     ...(patch && typeof patch === "object" ? patch : {})
   };
+  const currentUserId = String(game.user?.id ?? "").trim();
+  if (currentUserId && game.user?.isGM) {
+    const currentMap = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER) ?? {};
+    const nextMap = { ...currentMap, [currentUserId]: nextState };
+    await game.settings.set(MODULE_ID, SETTING_DISCORD_LINK_STATE_BY_USER, nextMap);
+  }
   if (game.user?.setFlag) {
     await game.user.setFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE, nextState);
   }
@@ -1967,11 +1999,13 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
         : tierValue === "tier1" ? "Tier 1"
           : "None";
   const monthlyLimit = Number(discordState.monthlyGenerationLimit || state.usageLimit || 0);
-  const maskedDiscordId = maskSensitiveValue(discordState.discordUserId, 3);
+  const discordId = String(discordState.discordUserId || state.accountId || "").trim();
+  const maskedDiscordId = maskSensitiveValue(discordId, 3);
   const expiresAtLabel = formatDisplayDate(discordState.expiresAt);
   const linkedLine = `Linked: ${discordState.linked ? "Yes" : "No"}`;
   const tierLine = `Tier: ${tierLabel}`;
-  const monthlyLine = `Monthly limit: ${monthlyLimit > 0 ? monthlyLimit : "Unknown"}`;
+  const isFounderTier = tierValue === "founder";
+  const monthlyLine = `Monthly limit: ${isFounderTier ? "Unlimited" : (monthlyLimit > 0 ? monthlyLimit : "Unknown")}`;
   const expiresLine = `Expiration: ${expiresAtLabel || "Not provided"}`;
   const discordLine = `Discord user: ${maskedDiscordId || "Not provided"}`;
   const migrationNotice = hasLegacyTokenForMigrationNotice()
