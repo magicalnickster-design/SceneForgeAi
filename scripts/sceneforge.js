@@ -467,6 +467,17 @@ const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_DISCORD_CONNECT_PATH = "/api/auth/discord/connect";
 const DISCORD_RELAY_STORAGE_KEY = `${MODULE_ID}.discordRelayPayload`;
 let DISCORD_LINK_IN_PROGRESS = false;
+const NOTIFICATION_THROTTLE_MS = 5000;
+const NOTIFICATION_LAST_AT = new Map();
+
+function notifyThrottled(type, key, message) {
+  const now = Date.now();
+  const last = Number(NOTIFICATION_LAST_AT.get(key) ?? 0);
+  if (now - last < NOTIFICATION_THROTTLE_MS) return;
+  NOTIFICATION_LAST_AT.set(key, now);
+  const notify = ui.notifications?.[type];
+  if (typeof notify === "function") notify(message);
+}
 
 /**
  * Base registry ships with the core module.
@@ -1261,7 +1272,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
       usageLimit: 0,
       resetAt: null
     });
-    if (notify) ui.notifications.warn("SceneForge AI: Please link Discord first.");
+    if (notify) notifyThrottled("warn", "discord-missing-token", "SceneForge AI: Please link Discord first.");
     return { ok: false, reason: "missing-token" };
   }
 
@@ -1303,7 +1314,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
           resetAt: null
         });
       }
-      if (notify) ui.notifications.error("SceneForge AI: Failed to sync Discord subscription status.");
+      if (notify) notifyThrottled("error", "discord-sync-failed", "SceneForge AI: Failed to sync Discord subscription status.");
       return { ok: false, reason: `http-${response.status}`, payload };
     }
 
@@ -1380,7 +1391,8 @@ async function linkDiscordAccount() {
       popup.location.href = authUrl;
     }
     if (!popup || popup.closed) {
-      ui.notifications.error("SceneForge AI: Could not open Discord auth window inside Foundry. Please allow in-app popups.");
+      ui.notifications.info("SceneForge AI: In-app popup blocked. Continuing Discord auth in this Foundry tab.");
+      window.location.assign(authUrl);
       return;
     }
 
