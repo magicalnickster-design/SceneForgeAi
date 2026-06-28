@@ -463,6 +463,7 @@ const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_DISCORD_CONNECT_PATH = "/api/auth/discord/connect";
+let DISCORD_LINK_IN_PROGRESS = false;
 
 /**
  * Base registry ships with the core module.
@@ -1215,90 +1216,81 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
 }
 
 async function linkDiscordAccount() {
+  if (DISCORD_LINK_IN_PROGRESS) {
+    ui.notifications.warn("SceneForge AI: Discord linking is already in progress.");
+    return;
+  }
+  DISCORD_LINK_IN_PROGRESS = true;
   const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
-  const endpoint = buildDiscordLinkUrl(returnUrl);
-  const connectEndpoint = endpoint || "";
-  let linkUrl = connectEndpoint;
-  if (connectEndpoint) {
-    try {
-      const connectResponse = await fetch(connectEndpoint, {
-        method: "GET",
-        headers: { Accept: "application/json" }
-      });
-      const payload = await connectResponse.json().catch(() => ({}));
-      if (connectResponse.ok) {
-        linkUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? connectEndpoint).trim();
-      }
-    } catch (_error) {
-      // Fallback to direct endpoint redirect flow.
-      linkUrl = connectEndpoint;
+  const linkUrl = buildDiscordLinkUrl(returnUrl);
+  try {
+    if (!linkUrl) {
+      ui.notifications.error("SceneForge AI: Discord connect endpoint is not configured.");
+      return;
     }
-  }
-  if (!linkUrl) {
-    ui.notifications.error("SceneForge AI: Discord connect endpoint is not configured.");
-    return;
-  }
 
-  const popup = window.open(linkUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
-  if (!popup) {
-    ui.notifications.warn("SceneForge AI: Popup was blocked. Redirecting to Discord link flow.");
-    window.location.assign(linkUrl);
-    return;
-  }
+    const popup = window.open(linkUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
+    if (!popup) {
+      ui.notifications.error("SceneForge AI: Popup was blocked. Please allow popups and try again.");
+      return;
+    }
 
-  ui.notifications.info("SceneForge AI: Complete Discord sign-in in the popup. Status will sync automatically.");
+    ui.notifications.info("SceneForge AI: Complete Discord sign-in in the popup. Status will sync automatically.");
 
-  await new Promise((resolve) => {
-    let resolved = false;
-    let handled = false;
-    const onMessage = (event) => {
-      const data = event?.data;
-      if (!data || typeof data !== "object") return;
-      if (data.type !== "sceneforge-discord-linked") return;
-      if (handled) return;
-      const payload = data.payload ?? data;
-      handled = true;
-      void (async () => {
-        await applyDiscordCallbackPayload(payload, { notify: true });
-        if (!popup.closed) popup.close();
-        cleanup();
-      })();
-    };
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      clearInterval(intervalId);
-      clearTimeout(timeoutId);
-      if (!resolved) {
-        resolved = true;
-        resolve();
-      }
-    };
-
-    const intervalId = window.setInterval(() => {
-      if (popup.closed) {
-        cleanup();
-        return;
-      }
-      try {
+    await new Promise((resolve) => {
+      let resolved = false;
+      let handled = false;
+      const onMessage = (event) => {
+        const data = event?.data;
+        if (!data || typeof data !== "object") return;
+        if (data.type !== "sceneforge-discord-linked") return;
         if (handled) return;
-        const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
-        if (hashPayload) {
-          handled = true;
-          void (async () => {
-            await applyDiscordCallbackPayload(hashPayload, { notify: true });
-            popup.close();
-            cleanup();
-          })();
+        const payload = data.payload ?? data;
+        handled = true;
+        void (async () => {
+          await applyDiscordCallbackPayload(payload, { notify: true });
+          if (!popup.closed) popup.close();
+          cleanup();
+        })();
+      };
+      const cleanup = () => {
+        window.removeEventListener("message", onMessage);
+        clearInterval(intervalId);
+        clearTimeout(timeoutId);
+        if (!resolved) {
+          resolved = true;
+          resolve();
         }
-      } catch (_error) {
-        // Cross-origin while on Discord; ignore until redirected back.
-      }
-    }, 500);
-    const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
-    window.addEventListener("message", onMessage);
-  });
+      };
 
-  await syncDiscordSubscriptionStatus({ notify: true });
+      const intervalId = window.setInterval(() => {
+        if (popup.closed) {
+          cleanup();
+          return;
+        }
+        try {
+          if (handled) return;
+          const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
+          if (hashPayload) {
+            handled = true;
+            void (async () => {
+              await applyDiscordCallbackPayload(hashPayload, { notify: true });
+              popup.close();
+              cleanup();
+            })();
+          }
+        } catch (_error) {
+          // Cross-origin while on Discord; ignore until redirected back.
+        }
+      }, 500);
+      const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
+      window.addEventListener("message", onMessage);
+    });
+
+    await syncDiscordSubscriptionStatus({ notify: true });
+  } finally {
+    DISCORD_LINK_IN_PROGRESS = false;
+  }
 }
 
 function formatLinkedAccountLabel(state) {
