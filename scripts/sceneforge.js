@@ -1103,6 +1103,9 @@ async function handleDiscordLinkCallbackHash() {
     const payload = parseDiscordCallbackHash(currentUrl.hash);
     if (!payload) return false;
     await applyDiscordCallbackPayload(payload, { notify: true });
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ type: "sceneforge-discord-linked", payload }, window.location.origin);
+    }
     currentUrl.hash = "";
     history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}`);
     return true;
@@ -1247,6 +1250,20 @@ async function linkDiscordAccount() {
 
   await new Promise((resolve) => {
     let resolved = false;
+    let handled = false;
+    const onMessage = (event) => {
+      const data = event?.data;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "sceneforge-discord-linked") return;
+      if (handled) return;
+      const payload = data.payload ?? data;
+      handled = true;
+      void (async () => {
+        await applyDiscordCallbackPayload(payload, { notify: true });
+        if (!popup.closed) popup.close();
+        cleanup();
+      })();
+    };
     const cleanup = () => {
       window.removeEventListener("message", onMessage);
       clearInterval(intervalId);
@@ -1263,17 +1280,22 @@ async function linkDiscordAccount() {
         return;
       }
       try {
+        if (handled) return;
         const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
         if (hashPayload) {
-          void applyDiscordCallbackPayload(hashPayload, { notify: true });
-          popup.close();
-          cleanup();
+          handled = true;
+          void (async () => {
+            await applyDiscordCallbackPayload(hashPayload, { notify: true });
+            popup.close();
+            cleanup();
+          })();
         }
       } catch (_error) {
         // Cross-origin while on Discord; ignore until redirected back.
       }
     }, 500);
     const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
+    window.addEventListener("message", onMessage);
   });
 
   await syncDiscordSubscriptionStatus({ notify: true });
