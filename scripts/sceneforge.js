@@ -1237,9 +1237,17 @@ async function linkDiscordAccount() {
         method: "GET",
         headers: { Accept: "application/json" }
       });
-      const payload = await connectResponse.json().catch(() => ({}));
+      const rawBody = await connectResponse.text();
       if (connectResponse.ok) {
-        authUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? connectEndpoint).trim() || connectEndpoint;
+        let parsedUrl = "";
+        try {
+          const payload = JSON.parse(rawBody);
+          parsedUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? "").trim();
+        } catch (_error) {
+          const plainTextMatch = rawBody.match(/https?:\/\/[^\s"']+/i);
+          parsedUrl = String(plainTextMatch?.[0] ?? "").trim();
+        }
+        authUrl = parsedUrl || connectEndpoint;
       }
     } catch (_error) {
       authUrl = connectEndpoint;
