@@ -3245,6 +3245,17 @@ async function generateAiMapImage(compiledPrompt, options = {}) {
 }
 
 async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
+  const stringifyBackendField = (value) => {
+    if (value == null) return "";
+    if (typeof value === "string") return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    try {
+      return JSON.stringify(value);
+    } catch (_error) {
+      return "";
+    }
+  };
+
   const provider = "subscription";
   const costEstimate = { preview: "included with subscription", final: "included with subscription" };
   const backendBaseUrl = getSubscriptionBackendUrl();
@@ -3330,17 +3341,19 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const backendMessage = String(payload?.error ?? payload?.message ?? "");
-      const backendDetail = String(
+      const backendMessage = stringifyBackendField(payload?.error ?? payload?.message);
+      const backendDetail = stringifyBackendField(
         payload?.detail
         ?? payload?.reason
         ?? payload?.backendMessage
         ?? payload?.providerError
         ?? payload?.upstreamError
+        ?? payload?.errors
         ?? payload?.error_description
-        ?? ""
-      ).trim();
+      );
+      const nestedErrorDetail = stringifyBackendField(payload?.error?.detail ?? payload?.error?.message ?? payload?.error?.reason);
       const backendCombinedMessage = [backendMessage, backendDetail]
+        .concat(nestedErrorDetail ? [nestedErrorDetail] : [])
         .map((part) => String(part ?? "").trim())
         .filter((part, index, arr) => part && arr.indexOf(part) === index)
         .join(" - ");
