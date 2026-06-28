@@ -17,6 +17,7 @@ const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
+const FLAG_DISCORD_LINK_STATE = "discordLinkState";
 const DEBUG = false;
 const GLOBAL_IMAGE_LIBRARY_ONLY = true;
 const TILE_FALLBACK_MODE = "skip-missing";
@@ -573,9 +574,25 @@ async function cleanupLegacyGeneratedJournals() {
 Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
   void enforceProductionSettingsDefaults();
+  void migrateLegacyDiscordStateToUserFlag();
   void handleDiscordLinkCallbackHash();
   void syncDiscordSubscriptionStatus({ notify: false });
 });
+
+async function migrateLegacyDiscordStateToUserFlag() {
+  if (!game.user?.setFlag || !game.settings?.get) return;
+  try {
+    const existingFlag = game.user.getFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE);
+    if (existingFlag && typeof existingFlag === "object" && String(existingFlag.token ?? "").trim()) return;
+    const legacyState = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE);
+    if (!legacyState || typeof legacyState !== "object") return;
+    const legacyToken = String(legacyState.token ?? "").trim();
+    if (!legacyToken) return;
+    await game.user.setFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE, legacyState);
+  } catch (_error) {
+    // Non-blocking migration; safe to ignore.
+  }
+}
 
 async function enforceProductionSettingsDefaults() {
   // Only a GM can persist world-scoped defaults.
@@ -883,9 +900,15 @@ function getDiscordLinkState() {
     lastError: "",
     lastMessage: ""
   };
-  const value = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE);
-  if (!value || typeof value !== "object") return fallback;
-  return { ...fallback, ...value };
+  const userState = game.user?.getFlag?.(MODULE_ID, FLAG_DISCORD_LINK_STATE);
+  if (userState && typeof userState === "object") {
+    return { ...fallback, ...userState };
+  }
+  const legacyClientState = game.settings.get(MODULE_ID, SETTING_DISCORD_LINK_STATE);
+  if (legacyClientState && typeof legacyClientState === "object") {
+    return { ...fallback, ...legacyClientState };
+  }
+  return fallback;
 }
 
 async function setDiscordLinkState(patch = {}) {
@@ -893,6 +916,10 @@ async function setDiscordLinkState(patch = {}) {
     ...getDiscordLinkState(),
     ...(patch && typeof patch === "object" ? patch : {})
   };
+  if (game.user?.setFlag) {
+    await game.user.setFlag(MODULE_ID, FLAG_DISCORD_LINK_STATE, nextState);
+  }
+  // Legacy fallback retained for one release to avoid breaking older clients.
   await game.settings.set(MODULE_ID, SETTING_DISCORD_LINK_STATE, nextState);
   return nextState;
 }
