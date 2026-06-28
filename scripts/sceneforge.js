@@ -1380,11 +1380,7 @@ async function linkDiscordAccount() {
       popup.location.href = authUrl;
     }
     if (!popup || popup.closed) {
-      popup = window.open(authUrl, "_blank");
-    }
-    if (!popup || popup.closed) {
-      ui.notifications.info("SceneForge AI: Redirecting this Foundry client to Discord authorization...");
-      window.location.assign(authUrl);
+      ui.notifications.error("SceneForge AI: Could not open Discord auth window inside Foundry. Please allow in-app popups.");
       return;
     }
 
