@@ -1222,16 +1222,37 @@ async function linkDiscordAccount() {
   }
   DISCORD_LINK_IN_PROGRESS = true;
   const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
-  const linkUrl = buildDiscordLinkUrl(returnUrl);
+  const connectEndpoint = buildDiscordLinkUrl(returnUrl);
   try {
-    if (!linkUrl) {
+    if (!connectEndpoint) {
       ui.notifications.error("SceneForge AI: Discord connect endpoint is not configured.");
       return;
     }
 
-    const popup = window.open(linkUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
-    if (!popup) {
-      ui.notifications.error("SceneForge AI: Popup was blocked. Please allow popups and try again.");
+    // Open synchronously from click event to avoid popup blockers.
+    let popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
+    let authUrl = connectEndpoint;
+    try {
+      const connectResponse = await fetch(connectEndpoint, {
+        method: "GET",
+        headers: { Accept: "application/json" }
+      });
+      const payload = await connectResponse.json().catch(() => ({}));
+      if (connectResponse.ok) {
+        authUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? connectEndpoint).trim() || connectEndpoint;
+      }
+    } catch (_error) {
+      authUrl = connectEndpoint;
+    }
+
+    if (!popup || popup.closed) {
+      // Fall back quietly if browser policy detached popup handle.
+      popup = window.open(authUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
+    } else {
+      popup.location.href = authUrl;
+    }
+    if (!popup || popup.closed) {
+      window.open(authUrl, "_blank", "noopener");
       return;
     }
 
