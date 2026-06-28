@@ -1310,8 +1310,64 @@ async function linkDiscordAccount() {
       authUrl = connectEndpoint;
     }
 
-    ui.notifications.info("SceneForge AI: Redirecting to Discord authorization in this Foundry client...");
-    window.location.assign(authUrl);
+    const popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
+    if (!popup || popup.closed) {
+      ui.notifications.warn("SceneForge AI: Could not open Discord auth window in Foundry. Please allow in-app popups.");
+      return;
+    }
+
+    popup.location.href = authUrl;
+    ui.notifications.info("SceneForge AI: Complete Discord sign-in in the auth window.");
+
+    await new Promise((resolve) => {
+      let resolved = false;
+      let handled = false;
+      const cleanup = () => {
+        window.removeEventListener("message", onMessage);
+        clearInterval(intervalId);
+        clearTimeout(timeoutId);
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+      const onMessage = (event) => {
+        const data = event?.data;
+        if (!data || typeof data !== "object") return;
+        if (data.type !== "sceneforge-discord-linked") return;
+        if (handled) return;
+        handled = true;
+        const payload = data.payload ?? data;
+        void (async () => {
+          await applyDiscordCallbackPayload(payload, { notify: true });
+          if (!popup.closed) popup.close();
+          cleanup();
+        })();
+      };
+      const intervalId = window.setInterval(() => {
+        if (popup.closed) {
+          cleanup();
+          return;
+        }
+        try {
+          if (handled) return;
+          const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
+          if (!hashPayload) return;
+          handled = true;
+          void (async () => {
+            await applyDiscordCallbackPayload(hashPayload, { notify: true });
+            popup.close();
+            cleanup();
+          })();
+        } catch (_error) {
+          // Cross-origin while on Discord; ignore until it returns.
+        }
+      }, 500);
+      const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
+      window.addEventListener("message", onMessage);
+    });
+
+    await syncDiscordSubscriptionStatus({ notify: true });
     return;
   } finally {
     DISCORD_LINK_IN_PROGRESS = false;
