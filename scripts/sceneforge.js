@@ -1288,8 +1288,6 @@ async function linkDiscordAccount() {
       return;
     }
 
-    // Open synchronously from click event to avoid popup blockers.
-    let popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
     let authUrl = connectEndpoint;
     try {
       const connectResponse = await fetch(connectEndpoint, {
@@ -1312,70 +1310,9 @@ async function linkDiscordAccount() {
       authUrl = connectEndpoint;
     }
 
-    if (!popup || popup.closed) {
-      // Fall back quietly if browser policy detached popup handle.
-      popup = window.open(authUrl, "sceneforge-discord-link", "popup=yes,width=620,height=820");
-    } else {
-      popup.location.href = authUrl;
-    }
-    if (!popup || popup.closed) {
-      window.open(authUrl, "_blank", "noopener");
-      return;
-    }
-
-    ui.notifications.info("SceneForge AI: Complete Discord sign-in in the popup. Status will sync automatically.");
-
-    await new Promise((resolve) => {
-      let resolved = false;
-      let handled = false;
-      const onMessage = (event) => {
-        const data = event?.data;
-        if (!data || typeof data !== "object") return;
-        if (data.type !== "sceneforge-discord-linked") return;
-        if (handled) return;
-        const payload = data.payload ?? data;
-        handled = true;
-        void (async () => {
-          await applyDiscordCallbackPayload(payload, { notify: true });
-          if (!popup.closed) popup.close();
-          cleanup();
-        })();
-      };
-      const cleanup = () => {
-        window.removeEventListener("message", onMessage);
-        clearInterval(intervalId);
-        clearTimeout(timeoutId);
-        if (!resolved) {
-          resolved = true;
-          resolve();
-        }
-      };
-
-      const intervalId = window.setInterval(() => {
-        if (popup.closed) {
-          cleanup();
-          return;
-        }
-        try {
-          if (handled) return;
-          const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
-          if (hashPayload) {
-            handled = true;
-            void (async () => {
-              await applyDiscordCallbackPayload(hashPayload, { notify: true });
-              popup.close();
-              cleanup();
-            })();
-          }
-        } catch (_error) {
-          // Cross-origin while on Discord; ignore until redirected back.
-        }
-      }, 500);
-      const timeoutId = window.setTimeout(() => cleanup(), 5 * 60 * 1000);
-      window.addEventListener("message", onMessage);
-    });
-
-    await syncDiscordSubscriptionStatus({ notify: true });
+    ui.notifications.info("SceneForge AI: Redirecting to Discord authorization in this Foundry client...");
+    window.location.assign(authUrl);
+    return;
   } finally {
     DISCORD_LINK_IN_PROGRESS = false;
   }
