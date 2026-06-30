@@ -455,6 +455,29 @@ const IMAGE_ORIENTATION_SPECS = {
   portrait: { key: "portrait", size: "1024x1536", promptLine: "PORTRAIT ORIENTATION" }
 };
 
+const IMAGE_SIZE_BY_SCALE_AND_ORIENTATION = {
+  small: {
+    landscape: "1536x1024",
+    square: "1280x1280",
+    portrait: "1024x1536"
+  },
+  medium: {
+    landscape: "2048x1280",
+    square: "1536x1536",
+    portrait: "1280x2048"
+  },
+  large: {
+    landscape: "2304x1536",
+    square: "1792x1792",
+    portrait: "1536x2304"
+  },
+  xlarge: {
+    landscape: "2560x1536",
+    square: "1984x1984",
+    portrait: "1536x2560"
+  }
+};
+
 /**
  * Theme labels are reused for UI strings and note summaries.
  */
@@ -1123,6 +1146,16 @@ function getSceneGridPixelSize(sceneSizeKey) {
 
 function getImageOrientationSpec(imageOrientationKey) {
   return IMAGE_ORIENTATION_SPECS[imageOrientationKey] ?? IMAGE_ORIENTATION_SPECS.landscape;
+}
+
+function getRequestedImageSize(sceneSizeKey, imageOrientationKey) {
+  const scaleKey = SCENE_SIZES[sceneSizeKey] ? sceneSizeKey : "medium";
+  const orientationKey = IMAGE_ORIENTATION_SPECS[imageOrientationKey] ? imageOrientationKey : "landscape";
+  return (
+    IMAGE_SIZE_BY_SCALE_AND_ORIENTATION?.[scaleKey]?.[orientationKey]
+    ?? IMAGE_ORIENTATION_SPECS[orientationKey]?.size
+    ?? "1536x1024"
+  );
 }
 
 function getDiscordLinkEndpoint() {
@@ -2407,6 +2440,7 @@ function buildGenerationConfigFromForm(form) {
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
   const orientationSpec = getImageOrientationSpec(imageOrientation);
+  const requestedImageSize = getRequestedImageSize(sceneSizeKey, imageOrientation);
   const theme = "ai-map";
   const lightingMood = "dim";
   const useDetectedSettings = false;
@@ -2430,7 +2464,7 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     sceneSizeKey,
     imageOrientation,
-    imageSize: orientationSpec.size,
+    imageSize: requestedImageSize,
     mapCoverageMeters,
     theme,
     lightingMood,
@@ -2446,7 +2480,7 @@ function buildGenerationConfigFromForm(form) {
       imageStatus: "not-requested",
       imagePath: null,
       costEstimate: null,
-      imageSize: orientationSpec.size,
+      imageSize: requestedImageSize,
       imageOrientation
     },
     enabledAssetPacks: [],
@@ -3002,7 +3036,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     mode: "preview",
     seed: generationData.seed,
     sourcePrompt: generationData.prompt ?? "",
-    imageSize: generationData.imageSize ?? getImageOrientationSpec(generationData.imageOrientation).size,
+    imageSize: generationData.imageSize ?? getRequestedImageSize(generationData.sceneSizeKey, generationData.imageOrientation),
     imageOrientation: generationData.imageOrientation ?? "landscape"
   });
   debugLog("AI imageResult", imageResult);
