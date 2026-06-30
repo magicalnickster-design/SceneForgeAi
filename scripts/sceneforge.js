@@ -222,8 +222,7 @@ function getSceneBackgroundSrc(scene) {
     ?? null;
   if (levelBackgroundSrc) return levelBackgroundSrc;
   return (
-    scene?.background?.src
-    ?? scene?._source?.background?.src
+    scene?._source?.background?.src
     ?? objectData?.background?.src
     ?? null
   );
@@ -1778,6 +1777,9 @@ async function voteOnSceneMap(scene, voteValue) {
 
 async function promptForGeneratedSceneVote(scene) {
   if (!scene) return;
+  const entryId = scene.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
+  if (!entryId) return;
+  if (!canUseGlobalImageDumpLibrary()) return;
   await new Promise((resolve) => {
     const dialog = new Dialog({
       title: "SceneForge AI: Keep this map for reuse?",
