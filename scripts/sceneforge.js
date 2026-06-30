@@ -132,6 +132,16 @@ function inferImageExtension(inputPath, mimeType = "") {
   return "png";
 }
 
+function parseImageSizeString(sizeValue) {
+  const raw = String(sizeValue ?? "").trim();
+  const match = raw.match(/^(\d{2,5})x(\d{2,5})$/i);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
 function dataUrlToBlob(dataUrl) {
   const match = String(dataUrl ?? "").match(/^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i);
   if (!match) throw new Error("Invalid data URL.");
@@ -195,14 +205,19 @@ const ASSET_PATH_AVAILABILITY_CACHE = new Map();
 
 function getSceneBackgroundSrc(scene) {
   const objectData = scene?.toObject ? scene.toObject() : null;
+  const levelBackgroundSrc =
+    scene?.levels?.contents?.[0]?.textures?.background?.src
+    ?? scene?.levels?.contents?.[0]?.background?.src
+    ?? scene?.collections?.levels?.contents?.[0]?.textures?.background?.src
+    ?? scene?.collections?.levels?.contents?.[0]?.background?.src
+    ?? objectData?.levels?.[0]?.textures?.background?.src
+    ?? objectData?.levels?.[0]?.background?.src
+    ?? null;
+  if (levelBackgroundSrc) return levelBackgroundSrc;
   return (
     scene?.background?.src
     ?? scene?._source?.background?.src
     ?? objectData?.background?.src
-    ?? scene?.levels?.contents?.[0]?.background?.src
-    ?? scene?.levels?.contents?.[0]?.textures?.background?.src
-    ?? objectData?.levels?.[0]?.background?.src
-    ?? objectData?.levels?.[0]?.textures?.background?.src
     ?? null
   );
 }
@@ -222,11 +237,10 @@ async function applyBackgroundToScene(scene, backgroundSrc) {
     };
   }
 
-  // Attempt 1: legacy scene-level background path (v12/v13 compatibility).
+  // Attempt 1: v14+ level background paths.
   await scene.update({
-    background: {
-      src: backgroundSrc
-    }
+    "levels.0.textures.background.src": backgroundSrc,
+    "levels.0.background.src": backgroundSrc
   });
   let finalBackgroundSrc = getSceneBackgroundSrc(scene);
   if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
@@ -236,10 +250,11 @@ async function applyBackgroundToScene(scene, backgroundSrc) {
     };
   }
 
-  // Attempt 2: v14+ level background path.
+  // Attempt 2: explicit level document update.
   const primaryLevel = getPrimarySceneLevel(scene);
   if (primaryLevel?.update) {
     await primaryLevel.update({
+      "textures.background.src": backgroundSrc,
       "background.src": backgroundSrc
     });
     finalBackgroundSrc = getSceneBackgroundSrc(scene);
@@ -251,9 +266,25 @@ async function applyBackgroundToScene(scene, backgroundSrc) {
     }
   }
 
-  // Attempt 3: dotted path update for versions storing flattened keys.
+  // Attempt 3: legacy scene-level background path (v12/v13 compatibility).
   await scene.update({
-    "background.src": backgroundSrc
+    background: {
+      src: backgroundSrc
+    }
+  });
+  finalBackgroundSrc = getSceneBackgroundSrc(scene);
+  if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
+    return {
+      applied: true,
+      finalBackgroundSrc
+    };
+  }
+
+  // Attempt 4: dotted path update for versions storing flattened keys.
+  await scene.update({
+    "background.src": backgroundSrc,
+    "levels.0.background.src": backgroundSrc,
+    "levels.0.textures.background.src": backgroundSrc
   });
   finalBackgroundSrc = getSceneBackgroundSrc(scene);
   if (pathsLikelyMatch(finalBackgroundSrc, backgroundSrc)) {
@@ -2730,14 +2761,17 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       // Reduce blur by matching scene pixel dimensions to the generated image.
       // The old fixed 50x50 grid at 100px (5000x5000) stretched 1024px maps heavily.
       const imageDimensions = await getImagePixelDimensions(persistedBackgroundPath);
-      if (imageDimensions?.width && imageDimensions?.height) {
+      const fallbackSize = parseImageSizeString(resolvedGenerationData.imageSize);
+      const resolvedImageWidth = Number(imageDimensions?.width ?? fallbackSize?.width ?? 0);
+      const resolvedImageHeight = Number(imageDimensions?.height ?? fallbackSize?.height ?? 0);
+      if (resolvedImageWidth > 0 && resolvedImageHeight > 0) {
         const resolvedGridPixelSize = getSceneGridPixelSize(resolvedGenerationData.sceneSizeKey);
         const mapCoverageMeters = Number(resolvedGenerationData.mapCoverageMeters ?? getMapCoverageMeters(resolvedGenerationData.sceneSizeKey));
-        const gridSquaresAcross = Math.max(1, imageDimensions.width / resolvedGridPixelSize);
+        const gridSquaresAcross = Math.max(1, resolvedImageWidth / resolvedGridPixelSize);
         const metersPerGrid = Math.max(0.1, mapCoverageMeters / gridSquaresAcross);
         await scene.update({
-          width: imageDimensions.width,
-          height: imageDimensions.height,
+          width: resolvedImageWidth,
+          height: resolvedImageHeight,
           grid: {
             type: CONST.GRID_TYPES.SQUARE,
             size: resolvedGridPixelSize,
