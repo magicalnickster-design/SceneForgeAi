@@ -62,6 +62,54 @@ function isBflDeliveryUrl(value) {
   return typeof value === "string" && /^https?:\/\/delivery\.[^.]+\.bfl\.ai\//i.test(value);
 }
 
+function buildDataUrlFromBase64(base64Value, mimeType = "image/png") {
+  const normalized = String(base64Value ?? "").trim();
+  if (!normalized) return "";
+  return `data:${String(mimeType || "image/png").trim()};base64,${normalized}`;
+}
+
+async function resolveBflRemoteImageForPersistence(remoteUrl) {
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  const token = getSubscriptionAuthToken();
+  if (!backendBaseUrl || !token) return null;
+
+  const candidates = [
+    { path: "/api/maps/image/proxy", method: "POST", body: { imageUrl: remoteUrl } },
+    { path: "/api/maps/image/proxy", method: "POST", body: { remoteUrl } },
+    { path: "/api/maps/image/fetch", method: "POST", body: { imageUrl: remoteUrl } },
+    { path: "/api/maps/image/fetch", method: "POST", body: { remoteUrl } }
+  ];
+
+  for (const candidate of candidates) {
+    const endpoint = `${backendBaseUrl}${candidate.path}`;
+    try {
+      const response = await fetch(endpoint, {
+        method: candidate.method,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(candidate.body)
+      });
+      if (!response.ok) continue;
+      const payload = await response.json().catch(() => ({}));
+      const localPath = String(payload?.localPath ?? payload?.path ?? payload?.imagePath ?? "").trim();
+      if (localPath && !isHttpUrl(localPath) && !isDataUrl(localPath)) return localPath;
+      const returnedDataUrl = String(payload?.dataUrl ?? payload?.imageDataUrl ?? "").trim();
+      if (returnedDataUrl && isDataUrl(returnedDataUrl)) return returnedDataUrl;
+      const base64Value = String(payload?.base64 ?? payload?.imageBase64 ?? "").trim();
+      if (base64Value) {
+        const mimeType = String(payload?.mimeType ?? payload?.contentType ?? "image/png").trim();
+        return buildDataUrlFromBase64(base64Value, mimeType);
+      }
+    } catch (_error) {
+      // Try the next candidate endpoint.
+    }
+  }
+  return null;
+}
+
 function normalizePathForComparison(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -170,9 +218,16 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
 
   // Already local/relative module path; no persistence needed.
   if (!isHttpUrl(trimmedPath) && !isDataUrl(trimmedPath)) return trimmedPath;
-  // BFL delivery URLs intentionally do not allow browser CORS fetches.
-  // Use the remote URL directly in-scene and rely on backend-side permanence strategy.
-  if (isBflDeliveryUrl(trimmedPath)) return trimmedPath;
+  // BFL delivery URLs intentionally do not allow direct browser CORS fetches.
+  // Try backend proxy/relay endpoints first so we can still persist locally.
+  let resolvedInputPath = trimmedPath;
+  if (isBflDeliveryUrl(trimmedPath)) {
+    const proxiedPath = await resolveBflRemoteImageForPersistence(trimmedPath);
+    if (proxiedPath) {
+      if (!isHttpUrl(proxiedPath) && !isDataUrl(proxiedPath)) return proxiedPath;
+      resolvedInputPath = proxiedPath;
+    }
+  }
   if (typeof FilePickerImpl?.upload !== "function" || typeof File !== "function") return trimmedPath;
 
   const { seed = "map", provider = "ai" } = options;
@@ -181,15 +236,15 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
 
   try {
     let blob;
-    if (isDataUrl(trimmedPath)) {
-      blob = dataUrlToBlob(trimmedPath);
+    if (isDataUrl(resolvedInputPath)) {
+      blob = dataUrlToBlob(resolvedInputPath);
     } else {
-      const response = await fetch(trimmedPath, { method: "GET", cache: "no-store" });
+      const response = await fetch(resolvedInputPath, { method: "GET", cache: "no-store" });
       if (!response.ok) throw new Error(`Background fetch failed (${response.status}).`);
       blob = await response.blob();
     }
 
-    const extension = inferImageExtension(trimmedPath, blob.type);
+    const extension = inferImageExtension(resolvedInputPath, blob.type);
     const safeProvider = String(provider ?? "ai").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
     const safeSeed = String(seed ?? "map").replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
     const filename = `map-${safeProvider}-${safeSeed}-${Date.now()}.${extension}`;
@@ -201,6 +256,12 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
     debugLog("Background persistence skipped; using original path", error?.message ?? error);
   }
 
+  if (isBflDeliveryUrl(trimmedPath)) {
+    logImagePipelineError("bfl remote image not persisted locally", {
+      imagePath: trimmedPath,
+      note: "Backend image proxy endpoint unavailable or fetch failed."
+    });
+  }
   return trimmedPath;
 }
 
