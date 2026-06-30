@@ -58,6 +58,10 @@ function isDataUrl(value) {
   return typeof value === "string" && value.startsWith("data:");
 }
 
+function isBflDeliveryUrl(value) {
+  return typeof value === "string" && /^https?:\/\/delivery\.[^.]+\.bfl\.ai\//i.test(value);
+}
+
 function normalizePathForComparison(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -166,6 +170,9 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
 
   // Already local/relative module path; no persistence needed.
   if (!isHttpUrl(trimmedPath) && !isDataUrl(trimmedPath)) return trimmedPath;
+  // BFL delivery URLs intentionally do not allow browser CORS fetches.
+  // Use the remote URL directly in-scene and rely on backend-side permanence strategy.
+  if (isBflDeliveryUrl(trimmedPath)) return trimmedPath;
   if (typeof FilePickerImpl?.upload !== "function" || typeof File !== "function") return trimmedPath;
 
   const { seed = "map", provider = "ai" } = options;
@@ -3349,6 +3356,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
   const normalizedPrompt = String(compiledPrompt ?? "").trim();
+  const parsedImageSize = parseImageSizeString(options.imageSize ?? "1536x1024");
   const requestPayload = {
     compiledPrompt: normalizedPrompt,
     // Compatibility aliases for backend variants that expect generic keys.
@@ -3359,7 +3367,9 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     layoutGraph: options.layoutGraph ?? null,
     sourcePrompt: options.sourcePrompt ?? "",
     imageSize: options.imageSize ?? "1536x1024",
-    imageOrientation: options.imageOrientation ?? "landscape"
+    imageOrientation: options.imageOrientation ?? "landscape",
+    width: parsedImageSize?.width ?? null,
+    height: parsedImageSize?.height ?? null
   };
   debugLog("Subscription generation request", { endpoint, requestPayload });
 
