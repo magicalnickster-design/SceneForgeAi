@@ -5445,12 +5445,61 @@ function formatMapScalePromptInstruction(sceneSizeKey, mapCoverageMeters) {
   ];
 }
 
+function parsePromptCountToken(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  if (!token) return null;
+  if (/^\d+$/.test(token)) return Number(token);
+  const words = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6
+  };
+  return words[token] ?? null;
+}
+
+function buildSpatialLogicConstraintLines(sourcePrompt) {
+  const text = String(sourcePrompt ?? "").trim().toLowerCase();
+  if (!text) return [];
+
+  const lines = [
+    "STRICTLY FOLLOW THE USER'S SPATIAL LOGIC, COUNTS, AND ACCESS RULES",
+    "ALL MAJOR ROOMS AND CORRIDORS MUST BE CLEARLY CONNECTED AND TRAVERSABLE",
+    "DO NOT ADD EXTRA EXITS, EXTRA MAIN PATHS, OR UNREQUESTED MAJOR ROOMS"
+  ];
+
+  const pathCountMatch = text.match(/\b(one|two|three|four|five|six|\d+)\s+(?:main\s+)?paths?\b/);
+  const pathCount = parsePromptCountToken(pathCountMatch?.[1]);
+  if (Number.isFinite(pathCount) && pathCount > 0) {
+    lines.push(`EXACTLY ${pathCount} DISTINCT MAIN PATHS OR ROUTES`);
+  }
+
+  if (/\bonly\s+the\s+left\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE LEFTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+right\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE RIGHTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+(middle|center|centre)\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE CENTER PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  }
+
+  const mentionsTreasure = /\btreasure|loot|artifact|artifacts|cache\b/.test(text);
+  if (mentionsTreasure && /\b(other|remaining)\s+(two|2|three|3)\b/.test(text)) {
+    lines.push("THE NON-EXIT PATHS SHOULD TERMINATE IN LOOT OR ARTIFACT ROOMS, NOT ADDITIONAL EXITS");
+  }
+
+  return lines;
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const spatialLogicLines = buildSpatialLogicConstraintLines(sourcePrompt);
   const lines = [
     sourcePrompt,
+    ...spatialLogicLines,
     "TRUE TOP DOWN BATTLE MAP",
     "90 DEGREE ORTHOGRAPHIC CAMERA",
     "BIRDS-EYE PLANIMETRIC VIEW FROM DIRECTLY OVERHEAD",
