@@ -1843,14 +1843,16 @@ async function markImageDumpEntryUsed(entryId, scene) {
 async function voteOnSceneMap(scene, voteValue) {
   const entryId = scene?.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
   if (!entryId) {
-    ui.notifications.warn("SceneForge AI: No image dump entry found for this scene.");
     return;
   }
   const userId = game.user?.id;
   if (!userId) return;
 
   if (!canUseGlobalImageDumpLibrary()) {
-    ui.notifications.error("SceneForge AI: Global vote service is required.");
+    logImagePipelineError("global vote skipped (global library unavailable)", {
+      sceneId: scene?.id ?? null,
+      vote: Number(voteValue)
+    });
     return;
   }
 
@@ -1862,11 +1864,14 @@ async function voteOnSceneMap(scene, voteValue) {
     }
   });
   if (response.ok) {
-    ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
     return;
   }
 
-  ui.notifications.error(`SceneForge AI: Global vote failed (${response.status || "network"}).`);
+  logImagePipelineError("global vote failed", {
+    entryId,
+    vote: Number(voteValue),
+    status: response.status || "network"
+  });
 }
 
 async function promptForGeneratedSceneVote(scene) {
@@ -2968,11 +2973,13 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   if (isGlobalLibraryOnlyModeEnabled()) {
     const provider = getAiImageProvider();
     if (provider !== "subscription") {
-      ui.notifications.error("SceneForge AI: Global library mode requires AI provider set to Subscription Backend.");
+      logImagePipelineError("global library only mode blocked generation (provider mismatch)", {
+        provider
+      });
       return;
     }
     if (!canUseGlobalImageDumpLibrary()) {
-      ui.notifications.error("SceneForge AI: Global library mode requires backend URL and subscription auth token.");
+      logImagePipelineError("global library only mode blocked generation (library unavailable)", {});
       return;
     }
   }
@@ -2982,7 +2989,6 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
   } catch (error) {
     logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
-    ui.notifications.warn("SceneForge AI: Global cache lookup failed. Proceeding with new image generation.");
     reusableEntry = null;
   }
   if (reusableEntry) {
@@ -4150,25 +4156,6 @@ function buildKeywordRanges(prompt, keywords, className) {
   }
 
   return ranges;
-}
-
-/**
- * Regenerate a scene from previously saved scene flags.
- */
-async function regenerateSceneFromFlags(scene) {
-  const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
-  if (!generationData) {
-    ui.notifications.warn("SceneForge AI: This scene has no saved generation data.");
-    return;
-  }
-
-  try {
-    await generateSceneLayout(scene, generationData, { isRegeneration: true });
-    ui.notifications.info(`SceneForge AI: Cleared SceneForge-generated overlays for "${scene.name}".`);
-  } catch (error) {
-    console.error(`${MODULE_ID} | Scene regeneration failed`, error);
-    ui.notifications.error("SceneForge AI: Failed to regenerate layout. Check browser console.");
-  }
 }
 
 /**
