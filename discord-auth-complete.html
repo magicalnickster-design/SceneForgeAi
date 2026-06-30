@@ -44,9 +44,15 @@
 
       var searchParams = new URLSearchParams(window.location.search || "");
       var gameReturnUrl = String(searchParams.get("gameReturnUrl") || "/game");
+      var openedAsChildWindow = Boolean(window.opener && !window.opener.closed);
       window.setTimeout(function () {
-        try { window.close(); } catch (_error) {}
-        if (!window.closed) window.location.assign(gameReturnUrl);
+        if (openedAsChildWindow) {
+          try { window.close(); } catch (_error) {}
+          if (!window.closed) window.location.assign(gameReturnUrl);
+          return;
+        }
+        // Same-tab fallback should never attempt to close the Foundry app window.
+        window.location.assign(gameReturnUrl);
       }, 1200);
     })();
   </script>
