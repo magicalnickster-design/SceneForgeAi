@@ -226,6 +226,12 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
     if (proxiedPath) {
       if (!isHttpUrl(proxiedPath) && !isDataUrl(proxiedPath)) return proxiedPath;
       resolvedInputPath = proxiedPath;
+    } else {
+      logImagePipelineError("bfl remote image cannot be persisted locally", {
+        imagePath: trimmedPath,
+        note: "Backend image relay endpoint is missing. Expected /api/maps/image/proxy or /api/maps/image/fetch."
+      });
+      return null;
     }
   }
   if (typeof FilePickerImpl?.upload !== "function" || typeof File !== "function") return trimmedPath;
@@ -256,12 +262,6 @@ async function persistSceneBackgroundPath(imagePath, options = {}) {
     debugLog("Background persistence skipped; using original path", error?.message ?? error);
   }
 
-  if (isBflDeliveryUrl(trimmedPath)) {
-    logImagePipelineError("bfl remote image not persisted locally", {
-      imagePath: trimmedPath,
-      note: "Backend image proxy endpoint unavailable or fetch failed."
-    });
-  }
   return trimmedPath;
 }
 
@@ -2824,7 +2824,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
           sceneName: scene.name
         });
         await scene.delete();
-        ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
+        ui.notifications.error("SceneForge AI: Could not save generated image locally. Scene was not created.");
         return;
       }
 
