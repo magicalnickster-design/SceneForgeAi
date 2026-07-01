@@ -21,9 +21,9 @@
   "languages": [],
   "packs": [],
   "socket": false,
-  "url": "",
-  "manifest": "",
-  "download": "",
+  "url": "https://github.com/magicalnickster-design/EchoParkTracker",
+  "manifest": "https://raw.githubusercontent.com/magicalnickster-design/EchoParkTracker/main/module.json",
+  "download": "https://github.com/magicalnickster-design/EchoParkTracker/releases/latest/download/sceneforge-ai.zip",
   "license": "MIT",
   "readme": "README.md"
 }
