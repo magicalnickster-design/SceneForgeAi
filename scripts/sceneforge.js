@@ -3505,11 +3505,17 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         .filter((part, index, arr) => part && arr.indexOf(part) === index)
         .join(" - ");
       const quotaErrorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").toLowerCase();
-      if (quotaErrorCode === "quota_exceeded") {
+      const isQuotaExceeded =
+        quotaErrorCode === "quota_exceeded"
+        || quotaErrorCode.includes("quota")
+        || quotaErrorCode.includes("limit")
+        || response.status === 429;
+      if (isQuotaExceeded) {
         const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? subscriptionState?.monthKey ?? "").trim();
         const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? subscriptionState?.usageLimit ?? 0);
         const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? subscriptionState?.usageCount ?? usageLimit);
         const monthLabel = monthKey || "this month";
+        void syncDiscordSubscriptionStatus({ notify: false });
         return {
           provider,
           imageStatus: "failed",
@@ -3570,6 +3576,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       };
     }
 
+    void syncDiscordSubscriptionStatus({ notify: false });
     return {
       provider,
       imageStatus: "complete",
