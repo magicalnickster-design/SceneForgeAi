@@ -1,4 +1,4 @@
-# SceneForge AI (EchoParkTracker)
+# SceneForge AI
 
 ## Subscription auth flow (Discord)
 
