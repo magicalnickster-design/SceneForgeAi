@@ -594,7 +594,15 @@ let DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = false;
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
 
-function notifyThrottled(type, key, message) {
+function notifyThrottled(type, message, options = {}) {
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const shouldNotify = normalizedOptions.notify !== false;
+  if (!shouldNotify) return;
+  const key = String(
+    normalizedOptions.key
+    ?? normalizedOptions.throttleKey
+    ?? `${type}:${String(message ?? "").trim()}`
+  );
   const now = Date.now();
   const last = Number(NOTIFICATION_LAST_AT.get(key) ?? 0);
   if (now - last < NOTIFICATION_THROTTLE_MS) return;
@@ -1509,11 +1517,13 @@ async function handleDiscordLinkCallbackHash() {
   }
 }
 
-async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
+async function syncDiscordSubscriptionStatus(options = {}) {
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const opts = { notify: true, ...normalizedOptions };
   const backendBaseUrl = getSubscriptionBackendUrl();
   debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   if (!backendBaseUrl) {
-    if (notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
+    if (opts.notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
     return { ok: false, reason: "missing-backend-url" };
   }
 
@@ -1533,7 +1543,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
       usageLimit: 0,
       resetAt: null
     });
-    if (notify) notifyThrottled("warn", "discord-missing-token", "SceneForge AI: Please link Discord first.");
+    if (opts.notify) notifyThrottled("warn", "SceneForge AI: Please link Discord first.", { key: "discord-missing-token" });
     return { ok: false, reason: "missing-token" };
   }
 
@@ -1575,7 +1585,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
           resetAt: null
         });
       }
-      if (notify) notifyThrottled("error", "discord-sync-failed", "SceneForge AI: Failed to sync Discord subscription status.");
+      if (opts.notify) notifyThrottled("error", "SceneForge AI: Failed to sync Discord subscription status.", { key: "discord-sync-failed" });
       return { ok: false, reason: `http-${response.status}`, payload };
     }
 
@@ -1596,7 +1606,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
       lastError: "",
       lastMessage: ""
     });
-    if (notify) {
+    if (opts.notify) {
       const remaining = Math.max(0, state.usageLimit - state.usageCount);
       const remainingLabel = state.unlimitedGenerations ? "Unlimited" : String(remaining);
       ui.notifications.info(`SceneForge AI: Discord synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
@@ -1604,7 +1614,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
     return { ok: true, state, payload };
   } catch (error) {
     logImagePipelineError("subscription status sync failed", { endpoint }, error);
-    if (notify) ui.notifications.error("SceneForge AI: Could not sync Discord status.");
+    if (opts.notify) ui.notifications.error("SceneForge AI: Could not sync Discord status.");
     return { ok: false, reason: "network-error", error };
   }
 }
