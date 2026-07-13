@@ -1998,14 +1998,16 @@ async function markImageDumpEntryUsed(entryId, scene) {
 async function voteOnSceneMap(scene, voteValue) {
   const entryId = scene?.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
   if (!entryId) {
-    ui.notifications.warn("SceneForge AI: No image dump entry found for this scene.");
     return;
   }
   const userId = game.user?.id;
   if (!userId) return;
 
   if (!canUseGlobalImageDumpLibrary()) {
-    ui.notifications.error("SceneForge AI: Global vote service is required.");
+    logImagePipelineError("global vote skipped (global library unavailable)", {
+      sceneId: scene?.id ?? null,
+      vote: Number(voteValue)
+    });
     return;
   }
 
@@ -2017,11 +2019,14 @@ async function voteOnSceneMap(scene, voteValue) {
     }
   });
   if (response.ok) {
-    ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
     return;
   }
 
-  ui.notifications.error(`SceneForge AI: Global vote failed (${response.status || "network"}).`);
+  logImagePipelineError("global vote failed", {
+    entryId,
+    vote: Number(voteValue),
+    status: response.status || "network"
+  });
 }
 
 async function promptForGeneratedSceneVote(scene) {
@@ -3123,11 +3128,13 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   if (isGlobalLibraryOnlyModeEnabled()) {
     const provider = getAiImageProvider();
     if (provider !== "subscription") {
-      ui.notifications.error("SceneForge AI: Global library mode requires AI provider set to Subscription Backend.");
+      logImagePipelineError("global library only mode blocked generation (provider mismatch)", {
+        provider
+      });
       return;
     }
     if (!canUseGlobalImageDumpLibrary()) {
-      ui.notifications.error("SceneForge AI: Global library mode requires backend URL and subscription auth token.");
+      logImagePipelineError("global library only mode blocked generation (library unavailable)", {});
       return;
     }
   }
@@ -3137,7 +3144,6 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
   } catch (error) {
     logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
-    ui.notifications.warn("SceneForge AI: Global cache lookup failed. Proceeding with new image generation.");
     reusableEntry = null;
   }
   if (reusableEntry) {
@@ -3654,11 +3660,17 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         .filter((part, index, arr) => part && arr.indexOf(part) === index)
         .join(" - ");
       const quotaErrorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").toLowerCase();
-      if (quotaErrorCode === "quota_exceeded") {
+      const isQuotaExceeded =
+        quotaErrorCode === "quota_exceeded"
+        || quotaErrorCode.includes("quota")
+        || quotaErrorCode.includes("limit")
+        || response.status === 429;
+      if (isQuotaExceeded) {
         const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? subscriptionState?.monthKey ?? "").trim();
         const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? subscriptionState?.usageLimit ?? 0);
         const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? subscriptionState?.usageCount ?? usageLimit);
         const monthLabel = monthKey || "this month";
+        void syncDiscordSubscriptionStatus({ notify: false });
         return {
           provider,
           imageStatus: "failed",
@@ -3719,6 +3731,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       };
     }
 
+    void syncDiscordSubscriptionStatus({ notify: false });
     return {
       provider,
       imageStatus: "complete",
@@ -4305,25 +4318,6 @@ function buildKeywordRanges(prompt, keywords, className) {
   }
 
   return ranges;
-}
-
-/**
- * Regenerate a scene from previously saved scene flags.
- */
-async function regenerateSceneFromFlags(scene) {
-  const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
-  if (!generationData) {
-    ui.notifications.warn("SceneForge AI: This scene has no saved generation data.");
-    return;
-  }
-
-  try {
-    await generateSceneLayout(scene, generationData, { isRegeneration: true });
-    ui.notifications.info(`SceneForge AI: Cleared SceneForge-generated overlays for "${scene.name}".`);
-  } catch (error) {
-    console.error(`${MODULE_ID} | Scene regeneration failed`, error);
-    ui.notifications.error("SceneForge AI: Failed to regenerate layout. Check browser console.");
-  }
 }
 
 /**
@@ -5613,12 +5607,61 @@ function formatMapScalePromptInstruction(sceneSizeKey, mapCoverageMeters) {
   ];
 }
 
+function parsePromptCountToken(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  if (!token) return null;
+  if (/^\d+$/.test(token)) return Number(token);
+  const words = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6
+  };
+  return words[token] ?? null;
+}
+
+function buildSpatialLogicConstraintLines(sourcePrompt) {
+  const text = String(sourcePrompt ?? "").trim().toLowerCase();
+  if (!text) return [];
+
+  const lines = [
+    "STRICTLY FOLLOW THE USER'S SPATIAL LOGIC, COUNTS, AND ACCESS RULES",
+    "ALL MAJOR ROOMS AND CORRIDORS MUST BE CLEARLY CONNECTED AND TRAVERSABLE",
+    "DO NOT ADD EXTRA EXITS, EXTRA MAIN PATHS, OR UNREQUESTED MAJOR ROOMS"
+  ];
+
+  const pathCountMatch = text.match(/\b(one|two|three|four|five|six|\d+)\s+(?:main\s+)?paths?\b/);
+  const pathCount = parsePromptCountToken(pathCountMatch?.[1]);
+  if (Number.isFinite(pathCount) && pathCount > 0) {
+    lines.push(`EXACTLY ${pathCount} DISTINCT MAIN PATHS OR ROUTES`);
+  }
+
+  if (/\bonly\s+the\s+left\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE LEFTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+right\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE RIGHTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+(middle|center|centre)\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE CENTER PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  }
+
+  const mentionsTreasure = /\btreasure|loot|artifact|artifacts|cache\b/.test(text);
+  if (mentionsTreasure && /\b(other|remaining)\s+(two|2|three|3)\b/.test(text)) {
+    lines.push("THE NON-EXIT PATHS SHOULD TERMINATE IN LOOT OR ARTIFACT ROOMS, NOT ADDITIONAL EXITS");
+  }
+
+  return lines;
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const spatialLogicLines = buildSpatialLogicConstraintLines(sourcePrompt);
   const lines = [
     sourcePrompt,
+    ...spatialLogicLines,
     "TRUE TOP DOWN BATTLE MAP",
     "90 DEGREE ORTHOGRAPHIC CAMERA",
     "BIRDS-EYE PLANIMETRIC VIEW FROM DIRECTLY OVERHEAD",
