@@ -594,7 +594,15 @@ let DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = false;
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
 
-function notifyThrottled(type, key, message) {
+function notifyThrottled(type, message, options = {}) {
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const shouldNotify = normalizedOptions.notify !== false;
+  if (!shouldNotify) return;
+  const key = String(
+    normalizedOptions.key
+    ?? normalizedOptions.throttleKey
+    ?? `${type}:${String(message ?? "").trim()}`
+  );
   const now = Date.now();
   const last = Number(NOTIFICATION_LAST_AT.get(key) ?? 0);
   if (now - last < NOTIFICATION_THROTTLE_MS) return;
@@ -1184,9 +1192,7 @@ function getDiscordCodeExchangeEndpoint() {
 
 function isFoundryDesktopRuntime() {
   const electronVersion = globalThis?.process?.versions?.electron;
-  if (typeof electronVersion === "string" && electronVersion.length > 0) return true;
-  const userAgent = String(globalThis?.navigator?.userAgent ?? "");
-  return /electron|foundryvirtualtabletop/i.test(userAgent);
+  return typeof electronVersion === "string" && electronVersion.length > 0;
 }
 
 function getDiscordLinkStrategy() {
@@ -1259,11 +1265,20 @@ function getHostedDiscordLinkErrorMessage(payload, fallback = "Discord link fail
   return message || fallback;
 }
 
+function redactLinkCodeForLog(linkCode) {
+  const normalized = String(linkCode ?? "").trim();
+  if (!normalized) return "(missing)";
+  if (normalized.length <= 6) return "***";
+  return `${normalized.slice(0, 3)}***${normalized.slice(-2)}`;
+}
+
 async function exchangeHostedDiscordLinkCode(linkCode) {
   const endpoint = getDiscordCodeExchangeEndpoint();
   if (!endpoint) {
     return { ok: false, status: 0, payload: null, message: "Subscription backend URL is not configured." };
   }
+  const redactedCode = redactLinkCodeForLog(linkCode);
+  debugLog("Hosted Discord exchange started", { code: redactedCode, endpoint });
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -1273,11 +1288,12 @@ async function exchangeHostedDiscordLinkCode(linkCode) {
       },
       body: JSON.stringify({
         code: String(linkCode ?? "").trim(),
-        source: MODULE_ID
+        source: "hosted-callback"
       })
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
+      debugLog("Hosted Discord exchange failed", { code: redactedCode, status: response.status });
       return {
         ok: false,
         status: response.status,
@@ -1285,8 +1301,10 @@ async function exchangeHostedDiscordLinkCode(linkCode) {
         message: getHostedDiscordLinkErrorMessage(payload, `Discord code exchange failed (${response.status}).`)
       };
     }
+    debugLog("Hosted Discord exchange succeeded", { code: redactedCode, status: response.status });
     return { ok: true, status: response.status, payload, message: "" };
   } catch (error) {
+    debugLog("Hosted Discord exchange errored", { code: redactedCode, message: error?.message ?? "network error" });
     return {
       ok: false,
       status: 0,
@@ -1299,6 +1317,7 @@ async function exchangeHostedDiscordLinkCode(linkCode) {
 async function maybeApplyHostedDiscordLinkCodeFromUrl({ notify = true } = {}) {
   const linkCode = getHostedDiscordLinkCodeFromLocation(window.location.href);
   if (!linkCode) return false;
+  debugLog("Hosted Discord link code detected in URL", { code: redactLinkCodeForLog(linkCode) });
   if (DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS) return false;
   DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = true;
   try {
@@ -1316,6 +1335,23 @@ async function maybeApplyHostedDiscordLinkCodeFromUrl({ notify = true } = {}) {
     removeHostedDiscordLinkCodeFromCurrentUrl();
     DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = false;
   }
+}
+
+async function resolveDiscordAuthUrl(connectEndpoint) {
+  let authUrl = connectEndpoint;
+  try {
+    const connectResponse = await fetch(connectEndpoint, {
+      method: "GET",
+      headers: { Accept: "application/json" }
+    });
+    if (!connectResponse.ok) return authUrl;
+    const payload = await connectResponse.json().catch(() => ({}));
+    const parsedUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? "").trim();
+    if (parsedUrl) authUrl = parsedUrl;
+  } catch (_error) {
+    authUrl = connectEndpoint;
+  }
+  return authUrl;
 }
 
 function consumeDiscordRelayPayloadFromStorage() {
@@ -1509,11 +1545,13 @@ async function handleDiscordLinkCallbackHash() {
   }
 }
 
-async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
+async function syncDiscordSubscriptionStatus(options = {}) {
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const opts = { notify: true, ...normalizedOptions };
   const backendBaseUrl = getSubscriptionBackendUrl();
   debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   if (!backendBaseUrl) {
-    if (notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
+    if (opts.notify) ui.notifications.warn("SceneForge AI: Subscription backend URL is not configured.");
     return { ok: false, reason: "missing-backend-url" };
   }
 
@@ -1533,7 +1571,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
       usageLimit: 0,
       resetAt: null
     });
-    if (notify) notifyThrottled("warn", "discord-missing-token", "SceneForge AI: Please link Discord first.");
+    if (opts.notify) notifyThrottled("warn", "SceneForge AI: Please link Discord first.", { key: "discord-missing-token" });
     return { ok: false, reason: "missing-token" };
   }
 
@@ -1575,7 +1613,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
           resetAt: null
         });
       }
-      if (notify) notifyThrottled("error", "discord-sync-failed", "SceneForge AI: Failed to sync Discord subscription status.");
+      if (opts.notify) notifyThrottled("error", "SceneForge AI: Failed to sync Discord subscription status.", { key: "discord-sync-failed" });
       return { ok: false, reason: `http-${response.status}`, payload };
     }
 
@@ -1596,7 +1634,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
       lastError: "",
       lastMessage: ""
     });
-    if (notify) {
+    if (opts.notify) {
       const remaining = Math.max(0, state.usageLimit - state.usageCount);
       const remainingLabel = state.unlimitedGenerations ? "Unlimited" : String(remaining);
       ui.notifications.info(`SceneForge AI: Discord synced. Tier: ${state.tier}. Remaining this month: ${remainingLabel}.`);
@@ -1604,7 +1642,7 @@ async function syncDiscordSubscriptionStatus({ notify = false } = {}) {
     return { ok: true, state, payload };
   } catch (error) {
     logImagePipelineError("subscription status sync failed", { endpoint }, error);
-    if (notify) ui.notifications.error("SceneForge AI: Could not sync Discord status.");
+    if (opts.notify) ui.notifications.error("SceneForge AI: Could not sync Discord status.");
     return { ok: false, reason: "network-error", error };
   }
 }
@@ -1629,27 +1667,7 @@ async function linkDiscordAccount() {
       return;
     }
 
-    let authUrl = connectEndpoint;
-    try {
-      const connectResponse = await fetch(connectEndpoint, {
-        method: "GET",
-        headers: { Accept: "application/json" }
-      });
-      const rawBody = await connectResponse.text();
-      if (connectResponse.ok) {
-        let parsedUrl = "";
-        try {
-          const payload = JSON.parse(rawBody);
-          parsedUrl = String(payload?.connectUrl ?? payload?.url ?? payload?.redirectUrl ?? "").trim();
-        } catch (_error) {
-          const plainTextMatch = rawBody.match(/https?:\/\/[^\s"']+/i);
-          parsedUrl = String(plainTextMatch?.[0] ?? "").trim();
-        }
-        authUrl = parsedUrl || connectEndpoint;
-      }
-    } catch (_error) {
-      authUrl = connectEndpoint;
-    }
+    const authUrl = await resolveDiscordAuthUrl(connectEndpoint);
 
     let popup = window.open("about:blank", "sceneforge-discord-link", "popup=yes,width=620,height=820");
     if (!popup || popup.closed) {
@@ -1691,59 +1709,66 @@ async function linkDiscordAccount() {
         })();
       };
       const intervalId = window.setInterval(() => {
-        try {
-          if (handled) return;
-          const relayNamePayload = parseDiscordRelayWindowName(popup.name ?? "");
-          if (relayNamePayload) {
+        if (strategy === "desktop-relay") {
+          try {
+            if (handled) return;
+            const relayNamePayload = parseDiscordRelayWindowName(popup.name ?? "");
+            if (relayNamePayload) {
+              handled = true;
+              void (async () => {
+                await applyDiscordCallbackPayload(relayNamePayload, { notify: true });
+                if (!popup.closed) popup.close();
+                cleanup();
+              })();
+              return;
+            }
+            const storagePayload = consumeDiscordRelayPayloadFromStorage();
+            if (storagePayload) {
+              handled = true;
+              void (async () => {
+                await applyDiscordCallbackPayload(storagePayload, { notify: true });
+                popup.close();
+                cleanup();
+              })();
+              return;
+            }
+            const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
+            if (!hashPayload) return;
             handled = true;
             void (async () => {
-              await applyDiscordCallbackPayload(relayNamePayload, { notify: true });
-              if (!popup.closed) popup.close();
-              cleanup();
-            })();
-            return;
-          }
-          const storagePayload = consumeDiscordRelayPayloadFromStorage();
-          if (storagePayload) {
-            handled = true;
-            void (async () => {
-              await applyDiscordCallbackPayload(storagePayload, { notify: true });
+              await applyDiscordCallbackPayload(hashPayload, { notify: true });
               popup.close();
               cleanup();
             })();
             return;
+          } catch (_error) {
+            // Cross-origin while on Discord; ignore until it returns.
           }
-          const hashPayload = parseDiscordCallbackHash(popup.location.hash ?? "");
-          if (!hashPayload) return;
-          handled = true;
-          void (async () => {
-            await applyDiscordCallbackPayload(hashPayload, { notify: true });
-            popup.close();
-            cleanup();
-          })();
-          return;
-        } catch (_error) {
-          // Cross-origin while on Discord; ignore until it returns.
-        }
-        try {
-          if (handled) return;
-          const hostedLinkCode = getHostedDiscordLinkCodeFromLocation(popup.location.href);
-          if (!hostedLinkCode) return;
-          handled = true;
-          void (async () => {
-            const exchange = await exchangeHostedDiscordLinkCode(hostedLinkCode);
-            if (exchange.ok) {
-              await applyDiscordCallbackPayload(exchange.payload, { notify: true });
-            } else {
-              ui.notifications.error(`SceneForge AI: ${exchange.message}`);
-            }
-            if (!popup.closed) popup.close();
-            cleanup();
-          })();
-        } catch (_error) {
-          // Cross-origin while on Discord; ignore until it returns.
+        } else {
+          try {
+            if (handled) return;
+            const hostedLinkCode = getHostedDiscordLinkCodeFromLocation(popup.location.href);
+            if (!hostedLinkCode) return;
+            handled = true;
+            void (async () => {
+              const exchange = await exchangeHostedDiscordLinkCode(hostedLinkCode);
+              if (exchange.ok) {
+                await applyDiscordCallbackPayload(exchange.payload, { notify: true });
+                await syncDiscordSubscriptionStatus({ notify: true });
+              } else {
+                ui.notifications.error(`SceneForge AI: ${exchange.message}`);
+              }
+              if (!popup.closed) popup.close();
+              cleanup();
+            })();
+          } catch (_error) {
+            // Cross-origin while on Discord; ignore until it returns.
+          }
         }
         if (popup.closed) {
+          if (!handled) {
+            notifyThrottled("warn", "SceneForge AI: Discord auth window closed before link completed.", { key: "discord-auth-popup-closed" });
+          }
           cleanup();
         }
       }, 500);
