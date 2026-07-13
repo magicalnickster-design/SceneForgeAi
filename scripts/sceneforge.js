@@ -586,8 +586,11 @@ const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const EARLY_ACCESS_SUBSCRIPTION_CODE = "EarlyAccess062026";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_DISCORD_CONNECT_PATH = "/api/auth/discord/connect";
+const DEFAULT_DISCORD_CODE_EXCHANGE_PATH = "/api/auth/discord/exchange-code";
 const DISCORD_RELAY_STORAGE_KEY = `${MODULE_ID}.discordRelayPayload`;
+const DISCORD_LINK_CODE_QUERY_PARAM = "sceneforgeLinkCode";
 let DISCORD_LINK_IN_PROGRESS = false;
+let DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = false;
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
 
@@ -711,6 +714,15 @@ Hooks.once("ready", () => {
   void migrateLegacyDiscordStateToUserFlag();
   void maybeApplyDiscordRelayPayloadFromStorage();
   void handleDiscordLinkCallbackHash();
+  void maybeApplyHostedDiscordLinkCodeFromUrl({ notify: true });
+  window.addEventListener("focus", () => {
+    void maybeApplyHostedDiscordLinkCodeFromUrl({ notify: true });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void maybeApplyHostedDiscordLinkCodeFromUrl({ notify: true });
+    }
+  });
   void syncDiscordSubscriptionStatus({ notify: false });
 });
 
@@ -1164,27 +1176,145 @@ function getDiscordLinkEndpoint() {
   return `${backend}${DEFAULT_DISCORD_CONNECT_PATH}`;
 }
 
-function buildDiscordLinkUrl(returnUrl) {
+function getDiscordCodeExchangeEndpoint() {
+  const backend = getSubscriptionBackendUrl();
+  if (!backend) return "";
+  return `${backend}${DEFAULT_DISCORD_CODE_EXCHANGE_PATH}`;
+}
+
+function isFoundryDesktopRuntime() {
+  const electronVersion = globalThis?.process?.versions?.electron;
+  if (typeof electronVersion === "string" && electronVersion.length > 0) return true;
+  const userAgent = String(globalThis?.navigator?.userAgent ?? "");
+  return /electron|foundryvirtualtabletop/i.test(userAgent);
+}
+
+function getDiscordLinkStrategy() {
+  return isFoundryDesktopRuntime() ? "desktop-relay" : "hosted-callback";
+}
+
+function getCurrentFoundryGameReturnUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.hash = "";
+    url.searchParams.delete(DISCORD_LINK_CODE_QUERY_PARAM);
+    return `${url.origin}${url.pathname}${url.search}`;
+  } catch (_error) {
+    return `${window.location.origin}${window.location.pathname}${window.location.search}`;
+  }
+}
+
+function buildDiscordLinkUrl(returnUrl, options = {}) {
   const endpoint = getDiscordLinkEndpoint();
   if (!endpoint) return "";
   try {
     const url = new URL(endpoint, window.location.origin);
     url.searchParams.set("source", MODULE_ID);
     url.searchParams.set("returnUrl", returnUrl);
+    if (options.strategy) {
+      url.searchParams.set("strategy", String(options.strategy));
+    }
+    if (options.gameReturnUrl) {
+      url.searchParams.set("gameReturnUrl", String(options.gameReturnUrl));
+    }
     return url.toString();
   } catch (_error) {
     return endpoint;
   }
 }
 
-function getDiscordRelayReturnUrl() {
-  const gameReturnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+function getDiscordRelayReturnUrl(gameReturnUrl = getCurrentFoundryGameReturnUrl()) {
   try {
     const relayUrl = new URL(`modules/${MODULE_ID}/discord-auth-complete.html`, window.location.origin);
     relayUrl.searchParams.set("gameReturnUrl", gameReturnUrl);
     return relayUrl.toString();
   } catch (_error) {
     return gameReturnUrl;
+  }
+}
+
+function getHostedDiscordLinkCodeFromLocation(href = window.location.href) {
+  try {
+    const url = new URL(href, window.location.origin);
+    return String(url.searchParams.get(DISCORD_LINK_CODE_QUERY_PARAM) ?? "").trim();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function removeHostedDiscordLinkCodeFromCurrentUrl() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(DISCORD_LINK_CODE_QUERY_PARAM)) return;
+    url.searchParams.delete(DISCORD_LINK_CODE_QUERY_PARAM);
+    history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+  } catch (_error) {
+    // Non-fatal URL cleanup.
+  }
+}
+
+function getHostedDiscordLinkErrorMessage(payload, fallback = "Discord link failed.") {
+  if (!payload || typeof payload !== "object") return fallback;
+  const message = String(payload?.message ?? payload?.detail ?? payload?.error ?? "").trim();
+  return message || fallback;
+}
+
+async function exchangeHostedDiscordLinkCode(linkCode) {
+  const endpoint = getDiscordCodeExchangeEndpoint();
+  if (!endpoint) {
+    return { ok: false, status: 0, payload: null, message: "Subscription backend URL is not configured." };
+  }
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        code: String(linkCode ?? "").trim(),
+        source: MODULE_ID
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        payload,
+        message: getHostedDiscordLinkErrorMessage(payload, `Discord code exchange failed (${response.status}).`)
+      };
+    }
+    return { ok: true, status: response.status, payload, message: "" };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      payload: null,
+      message: `Discord code exchange failed: ${error?.message ?? "network error"}`
+    };
+  }
+}
+
+async function maybeApplyHostedDiscordLinkCodeFromUrl({ notify = true } = {}) {
+  const linkCode = getHostedDiscordLinkCodeFromLocation(window.location.href);
+  if (!linkCode) return false;
+  if (DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS) return false;
+  DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = true;
+  try {
+    const exchange = await exchangeHostedDiscordLinkCode(linkCode);
+    if (!exchange.ok) {
+      if (notify) ui.notifications.error(`SceneForge AI: ${exchange.message}`);
+      return false;
+    }
+    const applied = await applyDiscordCallbackPayload(exchange.payload, { notify });
+    if (applied) {
+      await syncDiscordSubscriptionStatus({ notify });
+    }
+    return applied;
+  } finally {
+    removeHostedDiscordLinkCodeFromCurrentUrl();
+    DISCORD_LINK_CODE_EXCHANGE_IN_PROGRESS = false;
   }
 }
 
@@ -1485,8 +1615,14 @@ async function linkDiscordAccount() {
     return;
   }
   DISCORD_LINK_IN_PROGRESS = true;
-  const returnUrl = getDiscordRelayReturnUrl();
-  const connectEndpoint = buildDiscordLinkUrl(returnUrl);
+  const strategy = getDiscordLinkStrategy();
+  const gameReturnUrl = getCurrentFoundryGameReturnUrl();
+  const returnUrl = strategy === "desktop-relay"
+    ? getDiscordRelayReturnUrl(gameReturnUrl)
+    : gameReturnUrl;
+  const connectEndpoint = buildDiscordLinkUrl(returnUrl, { strategy, gameReturnUrl });
+  console.info(`${MODULE_ID} | Discord link strategy selected: ${strategy}`);
+  debugLog("Discord link strategy context", { strategy, returnUrl, gameReturnUrl });
   try {
     if (!connectEndpoint) {
       ui.notifications.error("SceneForge AI: Discord connect endpoint is not configured.");
@@ -1583,6 +1719,25 @@ async function linkDiscordAccount() {
           void (async () => {
             await applyDiscordCallbackPayload(hashPayload, { notify: true });
             popup.close();
+            cleanup();
+          })();
+          return;
+        } catch (_error) {
+          // Cross-origin while on Discord; ignore until it returns.
+        }
+        try {
+          if (handled) return;
+          const hostedLinkCode = getHostedDiscordLinkCodeFromLocation(popup.location.href);
+          if (!hostedLinkCode) return;
+          handled = true;
+          void (async () => {
+            const exchange = await exchangeHostedDiscordLinkCode(hostedLinkCode);
+            if (exchange.ok) {
+              await applyDiscordCallbackPayload(exchange.payload, { notify: true });
+            } else {
+              ui.notifications.error(`SceneForge AI: ${exchange.message}`);
+            }
+            if (!popup.closed) popup.close();
             cleanup();
           })();
         } catch (_error) {
