@@ -1,13 +1,11 @@
 (() => {
   const MODULE_ID = "sceneforge-ai";
-  const DEFAULT_AUTH_BASE_URL = "https://gambitsforge.online";
 
   function getAuthBaseUrl() {
     try {
-      const configured = String(game.settings?.get?.(MODULE_ID, "gambitsAuthBaseUrl") ?? "").trim();
-      return (configured || DEFAULT_AUTH_BASE_URL).replace(/\/+$/, "");
+      return String(game.settings?.get?.(MODULE_ID, "subscriptionBackendUrl") ?? "").trim().replace(/\/+$/, "");
     } catch (_error) {
-      return DEFAULT_AUTH_BASE_URL;
+      return "";
     }
   }
 
@@ -20,81 +18,68 @@
     }
   }
 
-  function normalizeSessionPayload(payload = {}) {
-    const user = payload?.user ?? payload?.profile ?? payload?.account ?? {};
-    const subscription = payload?.subscription ?? payload?.plan ?? payload?.billing ?? {};
-    const usage = payload?.usage ?? {};
-    const modules = payload?.modules ?? payload?.entitlements ?? [];
-    const moduleEntry = Array.isArray(modules)
-      ? modules.find((entry) => String(entry?.moduleId ?? entry?.id ?? "").toLowerCase() === MODULE_ID)
-      : null;
-    const moduleAllowed = moduleEntry
-      ? (moduleEntry.allowed !== false && moduleEntry.active !== false)
-      : Boolean(
-        payload?.entitlement?.allowed
-        ?? payload?.sceneforgeAllowed
-        ?? payload?.allowed
-        ?? false
-      );
-    const usageLimit = Number(
-      usage?.limit
-      ?? usage?.monthlyLimit
-      ?? payload?.monthlyGenerationLimit
-      ?? payload?.usageLimit
-      ?? 0
-    );
-    const usageUsed = Number(
-      usage?.used
-      ?? usage?.count
-      ?? payload?.monthlyGenerationUsed
-      ?? payload?.usageCount
-      ?? 0
-    );
+  function normalizeSessionPayload(authPayload = {}, entitlementPayload = {}) {
+    const usage = entitlementPayload?.usage ?? {};
+    const usageLimit = Number(usage?.limit ?? 0);
+    const usageUsed = Number(usage?.used ?? 0);
+    const usageRemaining = Number(usage?.remaining ?? Math.max(0, usageLimit - usageUsed));
     return {
       authenticated: true,
       user: {
-        id: String(user?.id ?? user?._id ?? payload?.userId ?? ""),
-        email: String(user?.email ?? payload?.email ?? ""),
-        displayName: String(user?.displayName ?? user?.name ?? payload?.name ?? "")
+        id: String(authPayload?.user?.id ?? ""),
+        email: String(authPayload?.user?.email ?? ""),
+        displayName: String(authPayload?.user?.email ?? "")
       },
       subscription: {
-        active: Boolean(subscription?.active ?? payload?.active ?? false),
-        plan: String(subscription?.plan ?? subscription?.name ?? payload?.tier ?? payload?.plan ?? ""),
-        status: String(subscription?.status ?? payload?.status ?? ""),
-        currentPeriodEnd: subscription?.currentPeriodEnd ?? payload?.currentPeriodEnd ?? payload?.expiresAt ?? null
+        active: String(entitlementPayload?.subscriptionStatus ?? "").toLowerCase() === "active",
+        plan: String(entitlementPayload?.plan ?? ""),
+        status: String(entitlementPayload?.subscriptionStatus ?? ""),
+        currentPeriodEnd: usage?.resetsAt ?? null
       },
       entitlement: {
-        allowed: Boolean(moduleAllowed),
+        allowed: Boolean(entitlementPayload?.allowed === true),
         moduleId: MODULE_ID
       },
       usage: {
-        remaining: Math.max(0, usageLimit - usageUsed),
+        remaining: Number.isFinite(usageRemaining) ? Math.max(0, usageRemaining) : 0,
         limit: Number.isFinite(usageLimit) ? Math.max(0, usageLimit) : 0
       },
-      accessToken: String(payload?.accessToken ?? payload?.token ?? ""),
-      refreshToken: String(payload?.refreshToken ?? ""),
-      expiresAt: String(payload?.expiresAt ?? payload?.accessTokenExpiresAt ?? "")
+      accessToken: String(authPayload?.accessToken ?? ""),
+      refreshToken: String(authPayload?.refreshToken ?? ""),
+      expiresAt: String(authPayload?.expiresAt ?? "")
     };
   }
 
-  async function jsonRequest(path, { method = "GET", body = null, accessToken = "", credentials = "include" } = {}) {
+  async function jsonRequest(path, { method = "GET", body = null, accessToken = "", extraHeaders = {} } = {}) {
     const baseUrl = getAuthBaseUrl();
-    if (!baseUrl) return { ok: false, status: 0, payload: null, message: "Backend URL is not configured." };
+    if (!baseUrl) {
+      return {
+        ok: false,
+        status: 0,
+        payload: null,
+        message: "Backend URL is not configured.",
+        errorCode: "BACKEND_UNAVAILABLE",
+        endpoint: ""
+      };
+    }
     const endpoint = `${baseUrl}${path}`;
     try {
-      const headers = { Accept: "application/json" };
+      const headers = {
+        Accept: "application/json",
+        ...extraHeaders
+      };
       if (body !== null) headers["Content-Type"] = "application/json";
       if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+
       const response = await fetch(endpoint, {
         method,
         headers,
-        credentials,
         body: body !== null ? JSON.stringify(body) : null
       });
       const rawText = await response.text();
       const payload = parseResponsePayload(rawText);
+      const errorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").trim() || "";
       const message = String(payload?.message ?? payload?.error ?? payload?.detail ?? "").trim();
-      const errorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").trim().toLowerCase();
       return { ok: response.ok, status: response.status, payload, message, errorCode, endpoint };
     } catch (error) {
       return {
@@ -102,106 +87,105 @@
         status: 0,
         payload: null,
         message: String(error?.message ?? "network error"),
-        errorCode: "network_error",
+        errorCode: "BACKEND_UNAVAILABLE",
         endpoint
       };
     }
   }
 
-  async function signIn({ email, password, rememberMe }) {
-    const result = await jsonRequest("/api/auth/login", {
+  async function login({ email, password, rememberMe }) {
+    const authResult = await jsonRequest("/api/auth/login", {
       method: "POST",
       body: {
         email: String(email ?? "").trim(),
         password: String(password ?? "")
       }
     });
-    if (!result.ok) return result;
-    const snapshot = await fetchAccountSnapshot(result.payload?.accessToken ?? result.payload?.token ?? "");
-    if (!snapshot.ok) return snapshot;
-    snapshot.payload = { ...(result.payload ?? {}), ...(snapshot.payload ?? {}) };
-    snapshot.normalized = normalizeSessionPayload(snapshot.payload);
-    snapshot.normalized.rememberMe = Boolean(rememberMe);
-    return snapshot;
+    if (!authResult.ok) return authResult;
+
+    const entitlementResult = await getEntitlement(String(authResult.payload?.accessToken ?? ""));
+    if (!entitlementResult.ok) return entitlementResult;
+
+    authResult.normalized = normalizeSessionPayload(authResult.payload ?? {}, entitlementResult.payload ?? {});
+    authResult.normalized.rememberMe = Boolean(rememberMe);
+    return authResult;
   }
 
-  async function refreshSession(refreshToken = "") {
-    const body = refreshToken ? { refreshToken: String(refreshToken ?? "") } : {};
-    const result = await jsonRequest("/api/auth/refresh", {
+  async function refresh(refreshToken) {
+    const refreshResult = await jsonRequest("/api/auth/refresh", {
       method: "POST",
-      body
+      body: {
+        refreshToken: String(refreshToken ?? "")
+      }
     });
-    if (!result.ok) return result;
-    const snapshot = await fetchAccountSnapshot(result.payload?.accessToken ?? result.payload?.token ?? "");
-    if (!snapshot.ok) return snapshot;
-    snapshot.payload = { ...(result.payload ?? {}), ...(snapshot.payload ?? {}) };
-    snapshot.normalized = normalizeSessionPayload(snapshot.payload);
-    return snapshot;
+    if (!refreshResult.ok) return refreshResult;
+
+    const entitlementResult = await getEntitlement(String(refreshResult.payload?.accessToken ?? ""));
+    if (!entitlementResult.ok) return entitlementResult;
+
+    refreshResult.normalized = normalizeSessionPayload(refreshResult.payload ?? {}, entitlementResult.payload ?? {});
+    return refreshResult;
   }
 
-  async function fetchCurrentUser(accessToken = "") {
-    return jsonRequest("/api/auth/me", { method: "GET", accessToken });
-  }
-
-  async function fetchSubscription(accessToken = "") {
-    return jsonRequest("/api/subscription", { method: "GET", accessToken });
-  }
-
-  async function fetchUsage(accessToken = "") {
-    return jsonRequest("/api/usage", { method: "GET", accessToken });
-  }
-
-  async function fetchEntitlement(accessToken = "", moduleId = MODULE_ID) {
-    const single = await jsonRequest(`/api/modules/${moduleId}`, { method: "GET", accessToken });
-    if (single.ok) return single;
-    const list = await jsonRequest("/api/modules", { method: "GET", accessToken });
-    return list;
-  }
-
-  async function fetchAccountSnapshot(accessToken = "") {
-    const [me, subscription, usage, entitlement] = await Promise.all([
-      fetchCurrentUser(accessToken),
-      fetchSubscription(accessToken),
-      fetchUsage(accessToken),
-      fetchEntitlement(accessToken, MODULE_ID)
-    ]);
-    const responses = [me, subscription, usage, entitlement];
-    const firstFailure = responses.find((entry) => !entry.ok);
-    if (firstFailure) return firstFailure;
-    const payload = {
-      user: me.payload ?? {},
-      subscription: subscription.payload ?? {},
-      usage: usage.payload ?? {},
-      entitlements: entitlement.payload?.modules ?? entitlement.payload ?? []
-    };
-    return {
-      ok: true,
-      status: 200,
-      payload,
-      message: "",
-      errorCode: "",
-      endpoint: "aggregate",
-      normalized: normalizeSessionPayload(payload)
-    };
-  }
-
-  async function logout() {
+  async function logout(refreshToken) {
     return jsonRequest("/api/auth/logout", {
       method: "POST",
-      body: {}
+      body: {
+        refreshToken: String(refreshToken ?? "")
+      }
+    });
+  }
+
+  async function getEntitlement(accessToken) {
+    return jsonRequest("/api/entitlements/sceneforge-ai", {
+      method: "GET",
+      accessToken
+    });
+  }
+
+  async function consume(accessToken, idempotencyKey) {
+    return jsonRequest("/api/entitlements/sceneforge-ai/consume", {
+      method: "POST",
+      accessToken,
+      body: {},
+      extraHeaders: {
+        "Idempotency-Key": String(idempotencyKey ?? "")
+      }
+    });
+  }
+
+  async function complete(accessToken, idempotencyKey) {
+    return jsonRequest("/api/entitlements/sceneforge-ai/complete", {
+      method: "POST",
+      accessToken,
+      body: {},
+      extraHeaders: {
+        "Idempotency-Key": String(idempotencyKey ?? "")
+      }
+    });
+  }
+
+  async function refund(accessToken, idempotencyKey) {
+    return jsonRequest("/api/entitlements/sceneforge-ai/refund", {
+      method: "POST",
+      accessToken,
+      body: {},
+      extraHeaders: {
+        "Idempotency-Key": String(idempotencyKey ?? "")
+      }
     });
   }
 
   function stateFromError(result) {
-    const code = String(result?.errorCode ?? "").toLowerCase();
-    const message = String(result?.message ?? "").toLowerCase();
-    const status = Number(result?.status ?? 0);
-    if (status === 0) return "backend_offline";
-    if (status === 401) return "session_expired";
-    if (status === 403 && (code.includes("unverified") || message.includes("verify"))) return "email_unverified";
-    if (status === 403 && (code.includes("inactive") || message.includes("inactive") || message.includes("subscription"))) return "subscription_inactive";
-    if (status === 403) return "entitlement_denied";
-    if (status === 429) return "usage_exhausted";
+    const code = String(result?.errorCode ?? "").toUpperCase();
+    if (code === "AUTH_REQUIRED") return "signed_out";
+    if (code === "SESSION_EXPIRED") return "session_expired";
+    if (code === "EMAIL_NOT_VERIFIED") return "email_unverified";
+    if (code === "SUBSCRIPTION_INACTIVE") return "subscription_inactive";
+    if (code === "ENTITLEMENT_DENIED") return "entitlement_denied";
+    if (code === "USAGE_EXHAUSTED") return "usage_exhausted";
+    if (code === "RATE_LIMITED") return "backend_offline";
+    if (code === "BACKEND_UNAVAILABLE") return "backend_offline";
     return "backend_offline";
   }
 
@@ -210,14 +194,13 @@
     getAuthBaseUrl,
     jsonRequest,
     normalizeSessionPayload,
-    fetchCurrentUser,
-    fetchSubscription,
-    fetchUsage,
-    fetchAccountSnapshot,
-    signIn,
-    refreshSession,
-    fetchEntitlement,
+    login,
+    refresh,
     logout,
+    getEntitlement,
+    consume,
+    complete,
+    refund,
     stateFromError
   };
 })();

@@ -84,12 +84,12 @@
     }
 
     setState(AUTH_STATES.LOADING);
-    let snapshot = await client.fetchAccountSnapshot(accessToken);
+    let snapshot = await client.getEntitlement(accessToken);
     if (!snapshot.ok && Number(snapshot.status) === 401 && refreshToken) {
       const refreshResult = await auth._refreshWithLock?.(auth, store, client);
       if (refreshResult?.ok) {
         const refreshedToken = store.getAccessToken();
-        snapshot = await client.fetchAccountSnapshot(refreshedToken);
+        snapshot = await client.getEntitlement(refreshedToken);
       }
     }
     if (!snapshot.ok) {
@@ -100,7 +100,7 @@
       return { ok: false, reason: nextState, status: snapshot.status, payload: snapshot.payload };
     }
 
-    const normalized = snapshot.normalized ?? client.normalizeSessionPayload?.(snapshot.payload ?? {}) ?? {};
+    const normalized = client.normalizeSessionPayload?.(store.getSession(), snapshot.payload ?? {}) ?? {};
     currentEntitlement = normalizeEntitlement(normalized);
     lastApiError = "";
 

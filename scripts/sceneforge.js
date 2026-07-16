@@ -574,7 +574,6 @@ const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
-const SETTING_GAMBITS_AUTH_BASE_URL = "gambitsAuthBaseUrl";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
@@ -718,6 +717,81 @@ function getAuthApi() {
   return globalThis.SceneForgeAuth ?? {};
 }
 
+function createIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const randomPart = Math.random().toString(16).slice(2);
+  return `sf-${Date.now()}-${randomPart}`;
+}
+
+function redactIdempotencyKey(idempotencyKey) {
+  const value = String(idempotencyKey ?? "").trim();
+  if (!value) return "(missing)";
+  if (value.length <= 8) return "***";
+  return `${value.slice(0, 4)}***${value.slice(-4)}`;
+}
+
+function mapAuthErrorCodeToMessage(errorCode, fallbackMessage) {
+  const code = String(errorCode ?? "").toUpperCase();
+  if (code === "AUTH_REQUIRED") return "Authentication required. Please sign in again.";
+  if (code === "SESSION_EXPIRED") return "Session expired. Please sign in again.";
+  if (code === "EMAIL_NOT_VERIFIED") return "Email not verified. Please verify your account.";
+  if (code === "SUBSCRIPTION_INACTIVE") return "Subscription inactive. Please update your plan.";
+  if (code === "ENTITLEMENT_DENIED") return "Entitlement denied for SceneForge AI.";
+  if (code === "USAGE_EXHAUSTED") return "No generations remaining for this billing period.";
+  if (code === "RATE_LIMITED") return "Too many requests. Please retry shortly.";
+  if (code === "BACKEND_UNAVAILABLE") return "Backend unavailable. Please retry shortly.";
+  return fallbackMessage || "Request failed.";
+}
+
+async function callEntitlementMutationWithAuthRetry(operation, idempotencyKey) {
+  const auth = getAuthApi();
+  const client = auth?.AuthClient;
+  const store = auth?.SessionStore;
+  const token = getSubscriptionAuthToken();
+  if (!token || !client || !store) {
+    return { ok: false, status: 401, errorCode: "AUTH_REQUIRED", message: "Missing authentication session." };
+  }
+  let result = await client?.[operation]?.(token, idempotencyKey);
+  if (!result?.ok && Number(result?.status ?? 0) === 401 && auth?._refreshWithLock) {
+    const refreshed = await auth._refreshWithLock(auth, store, client);
+    if (refreshed?.ok) {
+      const retryToken = getSubscriptionAuthToken();
+      if (retryToken) {
+        result = await client?.[operation]?.(retryToken, idempotencyKey);
+      }
+    }
+  }
+  return result ?? { ok: false, status: 0, errorCode: "BACKEND_UNAVAILABLE", message: "Mutation endpoint unavailable." };
+}
+
+async function completeGenerationReservation(idempotencyKey) {
+  return callEntitlementMutationWithAuthRetry("complete", idempotencyKey);
+}
+
+async function refundGenerationReservation(idempotencyKey) {
+  return callEntitlementMutationWithAuthRetry("refund", idempotencyKey);
+}
+
+function scheduleCompletionRetry(idempotencyKey, attempt = 1) {
+  const maxAttempts = 3;
+  if (attempt > maxAttempts) return;
+  const waitMs = attempt === 1 ? 2500 : 8000;
+  window.setTimeout(async () => {
+    const retry = await completeGenerationReservation(idempotencyKey);
+    if (retry.ok) {
+      debugLog("Completion retry succeeded", { idempotencyKey: redactIdempotencyKey(idempotencyKey), attempt });
+      return;
+    }
+    logImagePipelineError("generation completion retry failed", {
+      idempotencyKey: redactIdempotencyKey(idempotencyKey),
+      attempt,
+      status: retry.status ?? 0,
+      errorCode: retry.errorCode ?? ""
+    });
+    scheduleCompletionRetry(idempotencyKey, attempt + 1);
+  }, waitMs);
+}
+
 function registerAuthDiagnosticsCommand() {
   if (!DEBUG) return;
   globalThis.sceneforgeAuthDiagnostics = () => {
@@ -812,16 +886,6 @@ function registerAssetPackSettings() {
     config: false,
     type: String,
     default: DEFAULT_BACKEND_URL,
-    restricted: true
-  });
-
-  game.settings.register(MODULE_ID, SETTING_GAMBITS_AUTH_BASE_URL, {
-    name: "Gambits Auth Base URL",
-    hint: "Authentication API base URL.",
-    scope: "world",
-    config: false,
-    type: String,
-    default: "https://gambitsforge.online",
     restricted: true
   });
 
@@ -2924,9 +2988,22 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     };
   }
 
+  const idempotencyKey = createIdempotencyKey();
+  const reserve = await callEntitlementMutationWithAuthRetry("consume", idempotencyKey);
+  if (!reserve?.ok) {
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: mapAuthErrorCodeToMessage(reserve?.errorCode, reserve?.message || "Could not reserve generation usage.")
+    };
+  }
+
   const subscriptionSync = await syncSubscriptionStatus({ notify: false });
   const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
   if (subscriptionSync.ok && subscriptionState.active === false) {
+    await refundGenerationReservation(idempotencyKey);
     return {
       provider,
       imageStatus: "failed",
@@ -2941,6 +3018,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     && subscriptionState.usageLimit > 0
     && subscriptionState.usageCount >= subscriptionState.usageLimit
   ) {
+    await refundGenerationReservation(idempotencyKey);
     return {
       provider,
       imageStatus: "failed",
@@ -2973,13 +3051,18 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     const response = await authFetch(endpoint, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey
       },
       body: JSON.stringify(requestPayload)
     });
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
+      const refundResult = await refundGenerationReservation(idempotencyKey);
+      if (!refundResult.ok) {
+        ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
+      }
       const backendMessage = stringifyBackendField(payload?.error ?? payload?.message);
       const backendDetail = stringifyBackendField(
         payload?.detail
@@ -3049,6 +3132,10 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const imagePath = payload?.imagePath ?? payload?.image_url ?? payload?.url ?? null;
     if (!imagePath) {
+      const refundResult = await refundGenerationReservation(idempotencyKey);
+      if (!refundResult.ok) {
+        ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
+      }
       logImagePipelineError("subscription backend returned no image path", {
         provider,
         payloadKeys: Object.keys(payload ?? {})
@@ -3062,6 +3149,17 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       };
     }
 
+    const completion = await completeGenerationReservation(idempotencyKey);
+    if (!completion.ok) {
+      logImagePipelineError("generation completion failed after successful map generation", {
+        idempotencyKey: redactIdempotencyKey(idempotencyKey),
+        status: completion.status ?? 0,
+        errorCode: completion.errorCode ?? ""
+      });
+      scheduleCompletionRetry(idempotencyKey, 1);
+    }
+    await syncSubscriptionStatus({ notify: false });
+
     return {
       provider,
       imageStatus: "complete",
@@ -3070,6 +3168,15 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       generationMetadata
     };
   } catch (error) {
+    const refundResult = await refundGenerationReservation(idempotencyKey);
+    if (!refundResult.ok) {
+      ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
+      logImagePipelineError("generation refund failed after exception", {
+        idempotencyKey: redactIdempotencyKey(idempotencyKey),
+        status: refundResult.status ?? 0,
+        errorCode: refundResult.errorCode ?? ""
+      });
+    }
     logImagePipelineError("subscription backend exception", { provider, endpoint }, error);
     return {
       provider,

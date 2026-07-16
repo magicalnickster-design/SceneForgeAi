@@ -9,18 +9,18 @@
         await sessionStore.clearSession();
         return { ok: false, reason: "missing_refresh_token" };
       }
-      const refreshResult = await authClient.refreshSession(refreshToken);
+      const refreshResult = await authClient.refresh(refreshToken);
       if (!refreshResult.ok) {
         await sessionStore.clearSession();
         return { ok: false, reason: refreshResult.errorCode || "refresh_failed", status: refreshResult.status };
       }
-      const payload = refreshResult.payload ?? {};
+      const normalized = refreshResult.normalized ?? {};
       await sessionStore.setSession({
-        accessToken: String(payload?.accessToken ?? payload?.token ?? ""),
-        refreshToken: String(payload?.refreshToken ?? refreshToken),
+        accessToken: String(normalized?.accessToken ?? ""),
+        refreshToken: String(normalized?.refreshToken ?? refreshToken),
         tokenType: "Bearer",
-        expiresAt: String(payload?.expiresAt ?? payload?.accessTokenExpiresAt ?? ""),
-        user: payload?.user ?? sessionStore.getSession().user ?? null
+        expiresAt: String(normalized?.expiresAt ?? ""),
+        user: normalized?.user ?? sessionStore.getSession().user ?? null
       });
       return { ok: true };
     })();

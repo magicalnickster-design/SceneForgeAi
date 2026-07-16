@@ -10,11 +10,15 @@
       return false;
     }
 
-    const result = await client.signIn(formData);
+    const result = await client.login(formData);
     if (!result.ok) {
-      const code = String(result?.errorCode ?? "").toLowerCase();
-      if (code.includes("verify") || Number(result?.status) === 403) {
+      const code = String(result?.errorCode ?? "").toUpperCase();
+      if (code === "EMAIL_NOT_VERIFIED") {
         ui.notifications.error("SceneForge AI: Email verification required. Please verify your account.");
+      } else if (code === "AUTH_REQUIRED" || code === "SESSION_EXPIRED") {
+        ui.notifications.error("SceneForge AI: Session expired. Please sign in again.");
+      } else if (code === "BACKEND_UNAVAILABLE") {
+        ui.notifications.error("SceneForge AI: Backend unavailable. Please retry.");
       } else {
         ui.notifications.error(`SceneForge AI: ${result.message || "Sign in failed."}`);
       }
@@ -102,7 +106,7 @@
 
   async function logout() {
     const auth = globalThis.SceneForgeAuth ?? {};
-    await auth.AuthClient?.logout?.();
+    await auth.AuthClient?.logout?.(auth.SessionStore?.getRefreshToken?.());
     await auth.SessionStore?.clearSession?.();
     ui.notifications.info("SceneForge AI: Logged out.");
   }
