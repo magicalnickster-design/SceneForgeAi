@@ -574,6 +574,7 @@ const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
+const SETTING_GAMBITS_AUTH_BASE_URL = "gambitsAuthBaseUrl";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
@@ -707,12 +708,23 @@ async function cleanupLegacyGeneratedJournals() {
 Hooks.once("ready", () => {
   void cleanupLegacyGeneratedJournals();
   void enforceProductionSettingsDefaults();
+  void getAuthApi()?.SessionStore?.clearCorruptedSession?.();
   void getAuthApi()?.EntitlementService?.restoreSessionOnStartup?.({ notify: false });
   void syncSubscriptionStatus({ notify: false });
+  registerAuthDiagnosticsCommand();
 });
 
 function getAuthApi() {
   return globalThis.SceneForgeAuth ?? {};
+}
+
+function registerAuthDiagnosticsCommand() {
+  if (!DEBUG) return;
+  globalThis.sceneforgeAuthDiagnostics = () => {
+    const diagnostics = getAuthApi()?.EntitlementService?.getDiagnostics?.() ?? {};
+    console.info(`${MODULE_ID} | Auth diagnostics`, diagnostics);
+    return diagnostics;
+  };
 }
 
 async function enforceProductionSettingsDefaults() {
@@ -800,6 +812,16 @@ function registerAssetPackSettings() {
     config: false,
     type: String,
     default: DEFAULT_BACKEND_URL,
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_GAMBITS_AUTH_BASE_URL, {
+    name: "Gambits Auth Base URL",
+    hint: "Authentication API base URL.",
+    scope: "world",
+    config: false,
+    type: String,
+    default: "https://gambitsforge.online",
     restricted: true
   });
 
@@ -1677,6 +1699,7 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
 
   const state = getSubscriptionAccountState();
   const authState = getAuthApi()?.EntitlementService?.getState?.() ?? "Not Signed In";
+  const authStateMessage = getAuthApi()?.EntitlementService?.stateMessage?.(authState) ?? authState;
   const accountName = String(state.accountName || "Not Signed In");
   const planLine = `Plan: ${String(state.tier || "None")}`;
   const remaining = Math.max(0, Number(state.usageLimit || 0) - Number(state.usageCount || 0));
@@ -1685,6 +1708,7 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
     : "Generations Remaining: Unknown";
   const renewalLine = `Renewal Date: ${formatDisplayDate(state.resetAt) || "Not provided"}`;
   const stateLine = `State: ${authState}`;
+  const stateMessageLine = `Message: ${authStateMessage}`;
 
   const actions = document.createElement("div");
   actions.className = "form-group sceneforge-auth-actions";
@@ -1703,6 +1727,7 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
       <div>${foundry.utils.escapeHTML(generationLine)}</div>
       <div>${foundry.utils.escapeHTML(renewalLine)}</div>
       <div>${foundry.utils.escapeHTML(stateLine)}</div>
+      <div>${foundry.utils.escapeHTML(stateMessageLine)}</div>
     </div>
   `;
   anchorGroup.after(actions);

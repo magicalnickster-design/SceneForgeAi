@@ -17,6 +17,8 @@
   }
 
   function getSession() {
+    // Foundry client settings are persistent but not encrypted secure storage.
+    // Keep only minimal session tokens and non-sensitive account metadata.
     const fallback = {
       accessToken: "",
       refreshToken: "",
@@ -28,7 +30,9 @@
     };
     const raw = game.settings?.get?.(MODULE_ID, SETTING_AUTH_SESSION);
     if (!raw || typeof raw !== "object") return fallback;
-    return { ...fallback, ...raw };
+    const merged = { ...fallback, ...raw };
+    if (typeof merged !== "object" || Array.isArray(merged)) return fallback;
+    return merged;
   }
 
   async function setSession(nextSession = {}) {
@@ -42,6 +46,13 @@
 
   async function clearSession() {
     await game.settings.set(MODULE_ID, SETTING_AUTH_SESSION, {});
+  }
+
+  async function clearCorruptedSession() {
+    const raw = game.settings?.get?.(MODULE_ID, SETTING_AUTH_SESSION);
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) return false;
+    await clearSession();
+    return true;
   }
 
   function getAccessToken() {
@@ -66,6 +77,7 @@
     getSession,
     setSession,
     clearSession,
+    clearCorruptedSession,
     getAccessToken,
     getRefreshToken,
     isAccessTokenExpired

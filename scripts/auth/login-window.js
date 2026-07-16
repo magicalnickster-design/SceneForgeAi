@@ -12,18 +12,23 @@
 
     const result = await client.signIn(formData);
     if (!result.ok) {
-      ui.notifications.error(`SceneForge AI: ${result.message || "Sign in failed."}`);
+      const code = String(result?.errorCode ?? "").toLowerCase();
+      if (code.includes("verify") || Number(result?.status) === 403) {
+        ui.notifications.error("SceneForge AI: Email verification required. Please verify your account.");
+      } else {
+        ui.notifications.error(`SceneForge AI: ${result.message || "Sign in failed."}`);
+      }
       return false;
     }
 
-    const payload = result.payload ?? {};
+    const normalized = result.normalized ?? {};
     await store.setSession({
-      accessToken: String(payload?.accessToken ?? payload?.token ?? ""),
-      refreshToken: String(payload?.refreshToken ?? ""),
+      accessToken: String(normalized?.accessToken ?? ""),
+      refreshToken: String(normalized?.refreshToken ?? ""),
       tokenType: "Bearer",
-      expiresAt: String(payload?.expiresAt ?? payload?.accessTokenExpiresAt ?? ""),
+      expiresAt: String(normalized?.expiresAt ?? ""),
       rememberMe: Boolean(formData.rememberMe),
-      user: payload?.user ?? null
+      user: normalized?.user ?? null
     });
     const entitlementResult = await auth.EntitlementService?.syncEntitlement?.({ notify: false });
     if (entitlementResult?.ok) {
@@ -97,6 +102,7 @@
 
   async function logout() {
     const auth = globalThis.SceneForgeAuth ?? {};
+    await auth.AuthClient?.logout?.();
     await auth.SessionStore?.clearSession?.();
     ui.notifications.info("SceneForge AI: Logged out.");
   }

@@ -1,15 +1,19 @@
 (() => {
   const AUTH_STATES = Object.freeze({
-    NOT_SIGNED_IN: "Not Signed In",
-    SESSION_EXPIRED: "Session Expired",
-    SUBSCRIPTION_INACTIVE: "Subscription Inactive",
-    BACKEND_OFFLINE: "Backend Offline",
-    LOADING: "Loading",
-    AUTHENTICATED: "Authenticated"
+    LOADING: "loading",
+    SIGNED_OUT: "signed_out",
+    EMAIL_UNVERIFIED: "email_unverified",
+    SUBSCRIPTION_INACTIVE: "subscription_inactive",
+    ENTITLEMENT_DENIED: "entitlement_denied",
+    USAGE_EXHAUSTED: "usage_exhausted",
+    BACKEND_OFFLINE: "backend_offline",
+    SESSION_EXPIRED: "session_expired",
+    AUTHENTICATED: "authenticated"
   });
 
-  let currentState = AUTH_STATES.NOT_SIGNED_IN;
+  let currentState = AUTH_STATES.SIGNED_OUT;
   let currentEntitlement = null;
+  let lastApiError = "";
 
   function setState(nextState) {
     currentState = nextState;
@@ -19,25 +23,45 @@
     return currentState;
   }
 
-  function normalizeEntitlement(payload = {}) {
-    const tier = String(payload?.tier ?? payload?.plan ?? payload?.subscription?.tier ?? "none");
-    const usageLimit = Number(payload?.usageLimit ?? payload?.monthlyGenerationLimit ?? payload?.usage?.limit ?? 0);
-    const usageCount = Number(payload?.usageCount ?? payload?.monthlyGenerationUsed ?? payload?.usage?.used ?? 0);
-    const remaining = Math.max(0, usageLimit - usageCount);
-    const active = payload?.active === true || String(payload?.subscription?.active ?? payload?.active ?? "").toLowerCase() === "true";
+  function normalizeEntitlement(normalized = {}) {
+    const usageLimit = Number(normalized?.usage?.limit ?? 0);
+    const remaining = Number(normalized?.usage?.remaining ?? 0);
     return {
-      linked: Boolean(payload?.linked ?? true),
-      active,
-      tier,
-      plan: tier,
+      linked: Boolean(normalized?.authenticated ?? false),
+      active: Boolean(normalized?.subscription?.active ?? false),
+      tier: String(normalized?.subscription?.plan ?? "none"),
+      plan: String(normalized?.subscription?.plan ?? "none"),
       usageLimit: Number.isFinite(usageLimit) ? Math.max(0, usageLimit) : 0,
-      usageCount: Number.isFinite(usageCount) ? Math.max(0, usageCount) : 0,
+      usageCount: Math.max(0, (Number.isFinite(usageLimit) ? usageLimit : 0) - Math.max(0, remaining)),
       remainingGenerations: remaining,
-      renewalDate: String(payload?.resetAt ?? payload?.expiresAt ?? payload?.subscription?.expiresAt ?? ""),
-      user: payload?.user ?? null,
-      discordUserId: String(payload?.discordUserId ?? payload?.user?.id ?? ""),
-      payload
+      renewalDate: String(normalized?.subscription?.currentPeriodEnd ?? ""),
+      user: normalized?.user ?? null,
+      accountId: String(normalized?.user?.id ?? ""),
+      payload: normalized
     };
+  }
+
+  function stateMessage(state) {
+    switch (state) {
+      case AUTH_STATES.SIGNED_OUT:
+        return "Please sign in to Gambits Forge.";
+      case AUTH_STATES.EMAIL_UNVERIFIED:
+        return "Email is not verified. Please verify your email.";
+      case AUTH_STATES.SUBSCRIPTION_INACTIVE:
+        return "Subscription is inactive.";
+      case AUTH_STATES.ENTITLEMENT_DENIED:
+        return "Your account is not entitled to SceneForge AI.";
+      case AUTH_STATES.USAGE_EXHAUSTED:
+        return "Generation limit reached for this billing period.";
+      case AUTH_STATES.BACKEND_OFFLINE:
+        return "Authentication backend is offline.";
+      case AUTH_STATES.SESSION_EXPIRED:
+        return "Session expired. Please sign in again.";
+      case AUTH_STATES.AUTHENTICATED:
+        return "Authenticated.";
+      default:
+        return "Authentication in progress.";
+    }
   }
 
   async function syncEntitlement({ notify = false } = {}) {
@@ -46,54 +70,58 @@
     const client = auth.AuthClient;
     if (!store || !client) {
       setState(AUTH_STATES.BACKEND_OFFLINE);
+      lastApiError = "auth_unavailable";
       return { ok: false, reason: "auth-unavailable" };
     }
 
-    const accessToken = store.getAccessToken();
-    if (!accessToken) {
-      setState(AUTH_STATES.NOT_SIGNED_IN);
-      return { ok: false, reason: "not-signed-in" };
+    const session = store.getSession();
+    const accessToken = String(session.accessToken ?? "").trim();
+    const refreshToken = String(session.refreshToken ?? "").trim();
+    if (!accessToken && !refreshToken) {
+      setState(AUTH_STATES.SIGNED_OUT);
+      lastApiError = "";
+      return { ok: false, reason: "signed-out" };
     }
 
     setState(AUTH_STATES.LOADING);
-    const baseUrl = client.getBackendBaseUrl();
-    if (!baseUrl) {
-      setState(AUTH_STATES.BACKEND_OFFLINE);
-      return { ok: false, reason: "missing-backend-url" };
-    }
-    const endpoint = `${baseUrl}/api/subscription/status`;
-    const response = await auth.authenticatedFetch?.(endpoint, {
-      method: "GET",
-      headers: { Accept: "application/json" }
-    }, {
-      retryOnUnauthorized: true,
-      promptLoginOnFailure: false
-    });
-    const payload = await response?.json?.().catch?.(() => ({}));
-    if (!response?.ok) {
-      if (response?.status === 401) {
-        setState(AUTH_STATES.SESSION_EXPIRED);
-      } else if (!response || response?.status === 0) {
-        setState(AUTH_STATES.BACKEND_OFFLINE);
-      } else if (response?.status === 403) {
-        setState(AUTH_STATES.SUBSCRIPTION_INACTIVE);
-      } else {
-        setState(AUTH_STATES.BACKEND_OFFLINE);
+    let snapshot = await client.fetchAccountSnapshot(accessToken);
+    if (!snapshot.ok && Number(snapshot.status) === 401 && refreshToken) {
+      const refreshResult = await auth._refreshWithLock?.(auth, store, client);
+      if (refreshResult?.ok) {
+        const refreshedToken = store.getAccessToken();
+        snapshot = await client.fetchAccountSnapshot(refreshedToken);
       }
-      const failureMessage = String(payload?.message ?? payload?.error ?? payload?.detail ?? "Could not verify subscription.");
-      if (notify) ui.notifications.error(`SceneForge AI: ${failureMessage}`);
-      return { ok: false, reason: "entitlement-failed", status: response?.status ?? 0, payload };
+    }
+    if (!snapshot.ok) {
+      const nextState = client.stateFromError?.(snapshot) ?? AUTH_STATES.BACKEND_OFFLINE;
+      setState(nextState);
+      lastApiError = snapshot?.message ?? snapshot?.errorCode ?? "";
+      if (notify) ui.notifications.error(`SceneForge AI: ${snapshot?.message || stateMessage(nextState)}`);
+      return { ok: false, reason: nextState, status: snapshot.status, payload: snapshot.payload };
     }
 
-    currentEntitlement = normalizeEntitlement(payload ?? {});
+    const normalized = snapshot.normalized ?? client.normalizeSessionPayload?.(snapshot.payload ?? {}) ?? {};
+    currentEntitlement = normalizeEntitlement(normalized);
+    lastApiError = "";
+
     if (!currentEntitlement.active) {
       setState(AUTH_STATES.SUBSCRIPTION_INACTIVE);
       if (notify) ui.notifications.error("SceneForge AI: Subscription is inactive.");
-      return { ok: false, reason: "subscription-inactive", payload, entitlement: currentEntitlement };
+      return { ok: false, reason: AUTH_STATES.SUBSCRIPTION_INACTIVE, payload: snapshot.payload, entitlement: currentEntitlement };
+    }
+    if (!normalized?.entitlement?.allowed) {
+      setState(AUTH_STATES.ENTITLEMENT_DENIED);
+      if (notify) ui.notifications.error("SceneForge AI: Entitlement denied for SceneForge AI.");
+      return { ok: false, reason: AUTH_STATES.ENTITLEMENT_DENIED, payload: snapshot.payload, entitlement: currentEntitlement };
+    }
+    if (currentEntitlement.usageLimit > 0 && currentEntitlement.remainingGenerations <= 0) {
+      setState(AUTH_STATES.USAGE_EXHAUSTED);
+      if (notify) ui.notifications.error("SceneForge AI: No generations remaining.");
+      return { ok: false, reason: AUTH_STATES.USAGE_EXHAUSTED, payload: snapshot.payload, entitlement: currentEntitlement };
     }
 
     setState(AUTH_STATES.AUTHENTICATED);
-    return { ok: true, entitlement: currentEntitlement, payload };
+    return { ok: true, entitlement: currentEntitlement, payload: snapshot.payload };
   }
 
   async function restoreSessionOnStartup({ notify = false } = {}) {
@@ -105,25 +133,19 @@
     const result = await syncEntitlement({ notify: false });
     if (!result.ok) {
       if (notify) {
-        const message = getState() === AUTH_STATES.NOT_SIGNED_IN
-          ? "Please sign in to Gambits Forge first."
-          : getState() === AUTH_STATES.SESSION_EXPIRED
-            ? "Session expired. Please sign in again."
-            : getState() === AUTH_STATES.BACKEND_OFFLINE
-              ? "Gambits Forge backend is offline."
-              : "Subscription check failed.";
-        ui.notifications.error(`SceneForge AI: ${message}`);
+        ui.notifications.error(`SceneForge AI: ${stateMessage(getState())}`);
       }
       return { ok: false, reason: result.reason };
     }
 
     const entitlement = result.entitlement;
     if (!entitlement.active) {
-      if (notify) ui.notifications.error("SceneForge AI: Subscription inactive.");
+      if (notify) ui.notifications.error(`SceneForge AI: ${stateMessage(AUTH_STATES.SUBSCRIPTION_INACTIVE)}`);
       return { ok: false, reason: "inactive" };
     }
     if (entitlement.usageLimit > 0 && entitlement.usageCount >= entitlement.usageLimit) {
-      if (notify) ui.notifications.error(`SceneForge AI: Monthly generation limit reached (${entitlement.usageCount}/${entitlement.usageLimit}).`);
+      setState(AUTH_STATES.USAGE_EXHAUSTED);
+      if (notify) ui.notifications.error(`SceneForge AI: ${stateMessage(AUTH_STATES.USAGE_EXHAUSTED)}`);
       return { ok: false, reason: "limit-reached", entitlement };
     }
     return { ok: true, entitlement };
@@ -133,11 +155,32 @@
     return currentEntitlement;
   }
 
+  function getDiagnostics() {
+    const auth = globalThis.SceneForgeAuth ?? {};
+    const session = auth.SessionStore?.getSession?.() ?? {};
+    const client = auth.AuthClient;
+    return {
+      apiBaseUrl: client?.getAuthBaseUrl?.() ?? "",
+      authState: currentState,
+      userEmail: String(currentEntitlement?.user?.email ?? session?.user?.email ?? ""),
+      subscriptionStatus: String(currentEntitlement?.active ? "active" : "inactive"),
+      plan: String(currentEntitlement?.plan ?? ""),
+      entitlementAllowed: Boolean(currentEntitlement?.linked && currentEntitlement?.active),
+      usageRemaining: Number(currentEntitlement?.remainingGenerations ?? 0),
+      usageLimit: Number(currentEntitlement?.usageLimit ?? 0),
+      accessTokenExpiresAt: String(session?.expiresAt ?? ""),
+      hasRefreshToken: Boolean(String(session?.refreshToken ?? "").trim()),
+      lastApiError
+    };
+  }
+
   globalThis.SceneForgeAuth = globalThis.SceneForgeAuth ?? {};
   globalThis.SceneForgeAuth.EntitlementService = {
     AUTH_STATES,
+    stateMessage,
     getState,
     getEntitlementSnapshot,
+    getDiagnostics,
     syncEntitlement,
     restoreSessionOnStartup,
     ensureCanGenerate
