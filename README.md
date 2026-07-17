@@ -1,13 +1,13 @@
 # SceneForge AI
 
-## Subscription auth flow (Discord)
+## Subscription auth flow (Gambits Forge)
 
-SceneForge AI now uses Discord OAuth through the subscription backend.
+SceneForge AI uses Gambits Forge account authentication through the subscription backend.
 
 1. Open **Foundry -> Game Settings -> Configure Settings -> Module Settings -> SceneForge AI**.
-2. Click **Link Discord**.
-3. Complete Discord sign-in.
-4. Return to Foundry. SceneForge reads the callback hash and stores your session token.
+2. Click **Sign In**.
+3. Enter your Gambits Forge email and password.
+4. Return to Foundry and click **Sync Subscription** if needed.
 
 The module then uses:
 
@@ -21,7 +21,7 @@ The backend base URL must be:
 
 `https://sceneforge-backend.onrender.com`
 
-## Migration note
+## Account links
 
-Older worlds may still have a legacy token from prior Patreon/manual auth flows.
-SceneForge keeps reading that legacy token for one release as fallback, but users should relink with Discord.
+Forgot password and account creation are handled by:
+`https://gambitsforge.online`

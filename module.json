@@ -13,6 +13,12 @@
     "verified": "12"
   },
   "scripts": [
+    "scripts/auth/session-store.js",
+    "scripts/auth/generation-transaction.js",
+    "scripts/auth/auth-client.js",
+    "scripts/auth/authenticated-fetch.js",
+    "scripts/auth/entitlement-service.js",
+    "scripts/auth/login-window.js",
     "scripts/sceneforge.js"
   ],
   "styles": [
