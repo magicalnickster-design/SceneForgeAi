@@ -1,11 +1,14 @@
 (() => {
   const MODULE_ID = "sceneforge-ai";
+  const SETTING_AUTH_API_BASE_URL = "gambitsAuthApiBaseUrl";
+  const DEFAULT_AUTH_API_BASE_URL = "https://gambitsforge.online";
 
   function getAuthBaseUrl() {
     try {
-      return String(game.settings?.get?.(MODULE_ID, "subscriptionBackendUrl") ?? "").trim().replace(/\/+$/, "");
+      const configured = String(game.settings?.get?.(MODULE_ID, SETTING_AUTH_API_BASE_URL) ?? "").trim();
+      return (configured || DEFAULT_AUTH_API_BASE_URL).replace(/\/+$/, "");
     } catch (_error) {
-      return "";
+      return DEFAULT_AUTH_API_BASE_URL;
     }
   }
 

@@ -574,10 +574,12 @@ const SETTING_OPENAI_MONTHLY_LIMIT = "openAiMonthlyGenerationLimit";
 const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
+const SETTING_AUTH_API_BASE_URL = "gambitsAuthApiBaseUrl";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
+const DEFAULT_AUTH_API_BASE_URL = "https://gambitsforge.online";
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
 
@@ -812,6 +814,10 @@ async function enforceProductionSettingsDefaults() {
     if (!backendUrl) {
       await game.settings.set(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, DEFAULT_BACKEND_URL);
     }
+    const authApiUrl = String(game.settings.get(MODULE_ID, SETTING_AUTH_API_BASE_URL) ?? "").trim();
+    if (!authApiUrl) {
+      await game.settings.set(MODULE_ID, SETTING_AUTH_API_BASE_URL, DEFAULT_AUTH_API_BASE_URL);
+    }
 
     // Prevent stale direct-provider credentials from creating ambiguity.
     if (String(game.settings.get(MODULE_ID, SETTING_OPENAI_API_KEY) ?? "").trim()) {
@@ -881,11 +887,21 @@ function registerAssetPackSettings() {
 
   game.settings.register(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL, {
     name: "Subscription Backend URL",
-    hint: "Your hosted API base URL (example: https://api.sceneforge.ai).",
+    hint: "Generation API base URL for /api/maps/generate.",
     scope: "world",
     config: false,
     type: String,
     default: DEFAULT_BACKEND_URL,
+    restricted: true
+  });
+
+  game.settings.register(MODULE_ID, SETTING_AUTH_API_BASE_URL, {
+    name: "Gambits Auth API Base URL",
+    hint: "Auth + entitlement API base URL for Gambits Forge account and quota routes.",
+    scope: "world",
+    config: false,
+    type: String,
+    default: DEFAULT_AUTH_API_BASE_URL,
     restricted: true
   });
 
