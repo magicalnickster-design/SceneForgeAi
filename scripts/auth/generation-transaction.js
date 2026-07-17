@@ -32,6 +32,41 @@
     };
   }
 
+  function redactSupportKey(value) {
+    const normalized = normalizeGenerationId(value);
+    if (!normalized) return "(missing)";
+    if (normalized.length <= 8) return "***";
+    return `${normalized.slice(0, 4)}***${normalized.slice(-4)}`;
+  }
+
+  function buildRefundContractDecision({
+    idempotencyKey = "",
+    generationId = "",
+    reservationIdentifier = "",
+    reservationPayload = null
+  } = {}) {
+    const refundGenerationId = resolveRefundIdentifier({
+      generationId,
+      reservationIdentifier,
+      reservationPayload
+    });
+    const supportKey = redactSupportKey(idempotencyKey);
+    if (!refundGenerationId) {
+      return {
+        shouldRefund: false,
+        refundGenerationId: "",
+        supportKey,
+        userMessage: `SceneForge AI: Unable to refund generation automatically. Contact support with request key ${supportKey}.`
+      };
+    }
+    return {
+      shouldRefund: true,
+      refundGenerationId,
+      supportKey,
+      userMessage: ""
+    };
+  }
+
   function nextCompletionRetryContext(context = {}) {
     const current = createCompletionRetryContext(
       context?.idempotencyKey ?? "",
@@ -48,6 +83,8 @@
     normalizeGenerationId,
     extractReservationIdentifier,
     resolveRefundIdentifier,
+    redactSupportKey,
+    buildRefundContractDecision,
     createCompletionRetryContext,
     nextCompletionRetryContext
   };

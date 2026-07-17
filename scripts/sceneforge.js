@@ -726,6 +726,8 @@ function createIdempotencyKey() {
 }
 
 function redactIdempotencyKey(idempotencyKey) {
+  const transactionApi = getGenerationTransactionApi();
+  if (transactionApi?.redactSupportKey) return transactionApi.redactSupportKey(idempotencyKey);
   const value = String(idempotencyKey ?? "").trim();
   if (!value) return "(missing)";
   if (value.length <= 8) return "***";
@@ -805,6 +807,43 @@ async function refundGenerationReservation(idempotencyKey, generationId) {
     };
   }
   return callEntitlementMutationWithAuthRetry("refund", idempotencyKey, mutationGenerationId);
+}
+
+async function attemptRefundWithContract({
+  idempotencyKey,
+  generationId = "",
+  reservationIdentifier = "",
+  reservationPayload = null,
+  context = "generation_failure"
+} = {}) {
+  const decision = getGenerationTransactionApi()?.buildRefundContractDecision?.({
+    idempotencyKey,
+    generationId,
+    reservationIdentifier,
+    reservationPayload
+  }) ?? {
+    shouldRefund: Boolean(normalizeMutationGenerationId(generationId || reservationIdentifier)),
+    refundGenerationId: normalizeMutationGenerationId(generationId || reservationIdentifier),
+    supportKey: redactIdempotencyKey(idempotencyKey),
+    userMessage: ""
+  };
+
+  if (!decision.shouldRefund) {
+    const supportMessage = decision.userMessage
+      || `SceneForge AI: Unable to refund generation automatically. Contact support with request key ${decision.supportKey}.`;
+    ui.notifications.error(supportMessage);
+    logImagePipelineError("refund skipped missing generation identifier", {
+      context,
+      supportKey: decision.supportKey
+    });
+    return { ok: false, skipped: true, errorCode: "MISSING_GENERATION_ID", supportKey: decision.supportKey };
+  }
+
+  const refundResult = await refundGenerationReservation(idempotencyKey, decision.refundGenerationId);
+  if (!refundResult.ok) {
+    ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${decision.supportKey}.`);
+  }
+  return refundResult;
 }
 
 function scheduleCompletionRetry(idempotencyKey, generationId, attempt = 1) {
@@ -3078,7 +3117,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const subscriptionSync = await syncSubscriptionStatus({ notify: false });
   const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
   if (subscriptionSync.ok && subscriptionState.active === false) {
-    await refundGenerationReservation(idempotencyKey, reservationIdentifier);
+    await attemptRefundWithContract({
+      idempotencyKey,
+      reservationIdentifier,
+      reservationPayload: reserve?.payload,
+      context: "subscription_inactive_pre_generation"
+    });
     return {
       provider,
       imageStatus: "failed",
@@ -3093,7 +3137,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     && subscriptionState.usageLimit > 0
     && subscriptionState.usageCount >= subscriptionState.usageLimit
   ) {
-    await refundGenerationReservation(idempotencyKey, reservationIdentifier);
+    await attemptRefundWithContract({
+      idempotencyKey,
+      reservationIdentifier,
+      reservationPayload: reserve?.payload,
+      context: "usage_limit_pre_generation"
+    });
     return {
       provider,
       imageStatus: "failed",
@@ -3135,14 +3184,13 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const failedGenerationId = String(payload?.generationId ?? payload?.id ?? payload?.result?.generationId ?? "").trim();
-      const refundIdentifier = getGenerationTransactionApi()?.resolveRefundIdentifier?.({
+      await attemptRefundWithContract({
+        idempotencyKey,
         generationId: failedGenerationId,
-        reservationIdentifier
-      }) ?? (failedGenerationId || reservationIdentifier);
-      const refundResult = await refundGenerationReservation(idempotencyKey, refundIdentifier);
-      if (!refundResult.ok) {
-        ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
-      }
+        reservationIdentifier,
+        reservationPayload: reserve?.payload,
+        context: "generate_http_failure"
+      });
       const backendMessage = stringifyBackendField(payload?.error ?? payload?.message);
       const backendDetail = stringifyBackendField(
         payload?.detail
@@ -3212,14 +3260,13 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const imagePath = payload?.imagePath ?? payload?.image_url ?? payload?.url ?? null;
     if (!imagePath) {
-      const refundIdentifier = getGenerationTransactionApi()?.resolveRefundIdentifier?.({
+      await attemptRefundWithContract({
+        idempotencyKey,
         generationId: generationMetadata?.generationId,
-        reservationIdentifier
-      }) ?? (normalizeMutationGenerationId(generationMetadata?.generationId) || reservationIdentifier);
-      const refundResult = await refundGenerationReservation(idempotencyKey, refundIdentifier);
-      if (!refundResult.ok) {
-        ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
-      }
+        reservationIdentifier,
+        reservationPayload: reserve?.payload,
+        context: "missing_image_path_after_generate"
+      });
       logImagePipelineError("subscription backend returned no image path", {
         provider,
         payloadKeys: Object.keys(payload ?? {})
@@ -3256,12 +3303,16 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       generationMetadata
     };
   } catch (error) {
-    const refundResult = await refundGenerationReservation(idempotencyKey, reservationIdentifier);
-    if (!refundResult.ok) {
-      ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
+    const refundResult = await attemptRefundWithContract({
+      idempotencyKey,
+      reservationIdentifier,
+      reservationPayload: reserve?.payload,
+      context: "generate_exception"
+    });
+    if (!refundResult.ok && !refundResult.skipped) {
       logImagePipelineError("generation refund failed after exception", {
         idempotencyKey: redactIdempotencyKey(idempotencyKey),
-        generationId: redactIdempotencyKey(reservationIdentifier),
+        generationId: redactIdempotencyKey(refundResult?.payload?.generationId ?? reservationIdentifier),
         status: refundResult.status ?? 0,
         errorCode: refundResult.errorCode ?? ""
       });

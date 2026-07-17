@@ -98,3 +98,64 @@ test("completion retry context preserves generationId and idempotency key", () =
   assert.equal(next.generationId, "gen-keep");
   assert.equal(next.attempt, 2);
 });
+
+test("consume succeeds, generate fails pre-generationId, refund uses reservation identifier", async () => {
+  const calls = [];
+  const authClient = loadAuthClientWithFetch(async (url, init = {}) => {
+    calls.push({ url, init });
+    if (url.endsWith("/consume")) return createOkResponse({ reservationId: "reserve-77" });
+    if (url.endsWith("/refund")) return createOkResponse({ refunded: true });
+    return createOkResponse({ ok: true });
+  });
+
+  const idempotencyKey = "idem-contract-1";
+  const consumeResult = await authClient.consume("access-token", idempotencyKey);
+  assert.equal(consumeResult.ok, true);
+
+  // Simulate /api/maps/generate failure before returning generationId.
+  const refundDecision = transactionApi.buildRefundContractDecision({
+    idempotencyKey,
+    generationId: "",
+    reservationPayload: consumeResult.payload
+  });
+  assert.equal(refundDecision.shouldRefund, true);
+  assert.equal(refundDecision.refundGenerationId, "reserve-77");
+
+  const refundResult = await authClient.refund("access-token", idempotencyKey, refundDecision.refundGenerationId);
+  assert.equal(refundResult.ok, true);
+
+  const consumeCalls = calls.filter((entry) => String(entry.url).endsWith("/consume"));
+  const refundCalls = calls.filter((entry) => String(entry.url).endsWith("/refund"));
+  assert.equal(consumeCalls.length, 1, "no second consume call should occur");
+  assert.equal(refundCalls.length, 1, "refund should happen exactly once");
+
+  const refundCall = refundCalls[0];
+  assert.equal(refundCall.init?.headers?.["Idempotency-Key"], idempotencyKey, "same idempotency key preserved");
+  const refundBody = JSON.parse(refundCall.init?.body ?? "{}");
+  assert.deepEqual(refundBody, { generationId: "reserve-77" });
+  assert.ok(Object.keys(refundBody).length > 0, "refund body must not be empty");
+});
+
+test("missing generation and reservation identifiers skips refund and provides support key", async () => {
+  const calls = [];
+  const authClient = loadAuthClientWithFetch(async (url, init = {}) => {
+    calls.push({ url, init });
+    return createOkResponse({ ok: true });
+  });
+
+  const decision = transactionApi.buildRefundContractDecision({
+    idempotencyKey: "idem-support-9999",
+    generationId: "",
+    reservationIdentifier: "",
+    reservationPayload: {}
+  });
+
+  assert.equal(decision.shouldRefund, false);
+  assert.equal(decision.refundGenerationId, "");
+  assert.equal(decision.supportKey, "idem***9999");
+  assert.match(decision.userMessage, /Contact support with request key idem\*\*\*9999/);
+  if (decision.shouldRefund) {
+    await authClient.refund("access-token", "idem-support-9999", decision.refundGenerationId);
+  }
+  assert.equal(calls.filter((entry) => String(entry.url).endsWith("/refund")).length, 0);
+});
