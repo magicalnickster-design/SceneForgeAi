@@ -157,22 +157,52 @@
     });
   }
 
-  async function complete(accessToken, idempotencyKey) {
+  function normalizeGenerationId(generationId) {
+    return String(generationId ?? "").trim();
+  }
+
+  async function complete(accessToken, idempotencyKey, generationId) {
+    const normalizedGenerationId = normalizeGenerationId(generationId);
+    if (!normalizedGenerationId) {
+      return {
+        ok: false,
+        status: 400,
+        payload: null,
+        message: "generationId is required for completion.",
+        errorCode: "MISSING_GENERATION_ID",
+        endpoint: ""
+      };
+    }
     return jsonRequest("/api/entitlements/sceneforge-ai/complete", {
       method: "POST",
       accessToken,
-      body: {},
+      body: {
+        generationId: normalizedGenerationId
+      },
       extraHeaders: {
         "Idempotency-Key": String(idempotencyKey ?? "")
       }
     });
   }
 
-  async function refund(accessToken, idempotencyKey) {
+  async function refund(accessToken, idempotencyKey, generationId) {
+    const normalizedGenerationId = normalizeGenerationId(generationId);
+    if (!normalizedGenerationId) {
+      return {
+        ok: false,
+        status: 400,
+        payload: null,
+        message: "generationId is required for refund.",
+        errorCode: "MISSING_GENERATION_ID",
+        endpoint: ""
+      };
+    }
     return jsonRequest("/api/entitlements/sceneforge-ai/refund", {
       method: "POST",
       accessToken,
-      body: {},
+      body: {
+        generationId: normalizedGenerationId
+      },
       extraHeaders: {
         "Idempotency-Key": String(idempotencyKey ?? "")
       }

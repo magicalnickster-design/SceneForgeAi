@@ -745,7 +745,11 @@ function mapAuthErrorCodeToMessage(errorCode, fallbackMessage) {
   return fallbackMessage || "Request failed.";
 }
 
-async function callEntitlementMutationWithAuthRetry(operation, idempotencyKey) {
+function getGenerationTransactionApi() {
+  return getAuthApi()?.GenerationTransaction ?? null;
+}
+
+async function callEntitlementMutationWithAuthRetry(operation, idempotencyKey, generationId = "") {
   const auth = getAuthApi();
   const client = auth?.AuthClient;
   const store = auth?.SessionStore;
@@ -753,44 +757,92 @@ async function callEntitlementMutationWithAuthRetry(operation, idempotencyKey) {
   if (!token || !client || !store) {
     return { ok: false, status: 401, errorCode: "AUTH_REQUIRED", message: "Missing authentication session." };
   }
-  let result = await client?.[operation]?.(token, idempotencyKey);
+  const mutationGenerationId = normalizeMutationGenerationId(generationId);
+  let result = await client?.[operation]?.(token, idempotencyKey, mutationGenerationId);
   if (!result?.ok && Number(result?.status ?? 0) === 401 && auth?._refreshWithLock) {
     const refreshed = await auth._refreshWithLock(auth, store, client);
     if (refreshed?.ok) {
       const retryToken = getSubscriptionAuthToken();
       if (retryToken) {
-        result = await client?.[operation]?.(retryToken, idempotencyKey);
+        result = await client?.[operation]?.(retryToken, idempotencyKey, mutationGenerationId);
       }
     }
   }
   return result ?? { ok: false, status: 0, errorCode: "BACKEND_UNAVAILABLE", message: "Mutation endpoint unavailable." };
 }
 
-async function completeGenerationReservation(idempotencyKey) {
-  return callEntitlementMutationWithAuthRetry("complete", idempotencyKey);
+function normalizeMutationGenerationId(generationId) {
+  return getGenerationTransactionApi()?.normalizeGenerationId?.(generationId)
+    ?? String(generationId ?? "").trim();
 }
 
-async function refundGenerationReservation(idempotencyKey) {
-  return callEntitlementMutationWithAuthRetry("refund", idempotencyKey);
+function extractReservationIdentifier(payload) {
+  return getGenerationTransactionApi()?.extractReservationIdentifier?.(payload)
+    ?? "";
 }
 
-function scheduleCompletionRetry(idempotencyKey, attempt = 1) {
+async function completeGenerationReservation(idempotencyKey, generationId) {
+  const mutationGenerationId = normalizeMutationGenerationId(generationId);
+  if (!mutationGenerationId) {
+    return {
+      ok: false,
+      status: 400,
+      errorCode: "MISSING_GENERATION_ID",
+      message: "Missing generationId for completion."
+    };
+  }
+  return callEntitlementMutationWithAuthRetry("complete", idempotencyKey, mutationGenerationId);
+}
+
+async function refundGenerationReservation(idempotencyKey, generationId) {
+  const mutationGenerationId = normalizeMutationGenerationId(generationId);
+  if (!mutationGenerationId) {
+    return {
+      ok: false,
+      status: 400,
+      errorCode: "MISSING_GENERATION_ID",
+      message: "Missing generationId for refund."
+    };
+  }
+  return callEntitlementMutationWithAuthRetry("refund", idempotencyKey, mutationGenerationId);
+}
+
+function scheduleCompletionRetry(idempotencyKey, generationId, attempt = 1) {
+  const retryApi = getGenerationTransactionApi();
+  const retryContext = retryApi?.createCompletionRetryContext
+    ? retryApi.createCompletionRetryContext(idempotencyKey, generationId, attempt)
+    : {
+      idempotencyKey: normalizeMutationGenerationId(idempotencyKey),
+      generationId: normalizeMutationGenerationId(generationId),
+      attempt: Number(attempt ?? 1)
+    };
+  const mutationGenerationId = retryContext.generationId;
+  const mutationIdempotencyKey = retryContext.idempotencyKey;
+  if (!mutationGenerationId || !mutationIdempotencyKey) return;
   const maxAttempts = 3;
-  if (attempt > maxAttempts) return;
-  const waitMs = attempt === 1 ? 2500 : 8000;
+  if (retryContext.attempt > maxAttempts) return;
+  const waitMs = retryContext.attempt === 1 ? 2500 : 8000;
   window.setTimeout(async () => {
-    const retry = await completeGenerationReservation(idempotencyKey);
+    const retry = await completeGenerationReservation(mutationIdempotencyKey, mutationGenerationId);
     if (retry.ok) {
-      debugLog("Completion retry succeeded", { idempotencyKey: redactIdempotencyKey(idempotencyKey), attempt });
+      debugLog("Completion retry succeeded", {
+        idempotencyKey: redactIdempotencyKey(mutationIdempotencyKey),
+        generationId: redactIdempotencyKey(mutationGenerationId),
+        attempt: retryContext.attempt
+      });
       return;
     }
     logImagePipelineError("generation completion retry failed", {
-      idempotencyKey: redactIdempotencyKey(idempotencyKey),
-      attempt,
+      idempotencyKey: redactIdempotencyKey(mutationIdempotencyKey),
+      generationId: redactIdempotencyKey(mutationGenerationId),
+      attempt: retryContext.attempt,
       status: retry.status ?? 0,
       errorCode: retry.errorCode ?? ""
     });
-    scheduleCompletionRetry(idempotencyKey, attempt + 1);
+    const next = retryApi?.nextCompletionRetryContext
+      ? retryApi.nextCompletionRetryContext(retryContext)
+      : { ...retryContext, attempt: retryContext.attempt + 1 };
+    scheduleCompletionRetry(next.idempotencyKey, next.generationId, next.attempt);
   }, waitMs);
 }
 
@@ -3015,11 +3067,18 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       errorMessage: mapAuthErrorCodeToMessage(reserve?.errorCode, reserve?.message || "Could not reserve generation usage.")
     };
   }
+  const reservationIdentifier = extractReservationIdentifier(reserve?.payload);
+  if (!reservationIdentifier) {
+    logImagePipelineError("consume response missing reservation identifier", {
+      idempotencyKey: redactIdempotencyKey(idempotencyKey),
+      payloadKeys: Object.keys(reserve?.payload ?? {})
+    });
+  }
 
   const subscriptionSync = await syncSubscriptionStatus({ notify: false });
   const subscriptionState = subscriptionSync?.state ?? getSubscriptionAccountState();
   if (subscriptionSync.ok && subscriptionState.active === false) {
-    await refundGenerationReservation(idempotencyKey);
+    await refundGenerationReservation(idempotencyKey, reservationIdentifier);
     return {
       provider,
       imageStatus: "failed",
@@ -3034,7 +3093,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     && subscriptionState.usageLimit > 0
     && subscriptionState.usageCount >= subscriptionState.usageLimit
   ) {
-    await refundGenerationReservation(idempotencyKey);
+    await refundGenerationReservation(idempotencyKey, reservationIdentifier);
     return {
       provider,
       imageStatus: "failed",
@@ -3075,7 +3134,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const refundResult = await refundGenerationReservation(idempotencyKey);
+      const failedGenerationId = String(payload?.generationId ?? payload?.id ?? payload?.result?.generationId ?? "").trim();
+      const refundIdentifier = getGenerationTransactionApi()?.resolveRefundIdentifier?.({
+        generationId: failedGenerationId,
+        reservationIdentifier
+      }) ?? (failedGenerationId || reservationIdentifier);
+      const refundResult = await refundGenerationReservation(idempotencyKey, refundIdentifier);
       if (!refundResult.ok) {
         ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
       }
@@ -3148,7 +3212,11 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const imagePath = payload?.imagePath ?? payload?.image_url ?? payload?.url ?? null;
     if (!imagePath) {
-      const refundResult = await refundGenerationReservation(idempotencyKey);
+      const refundIdentifier = getGenerationTransactionApi()?.resolveRefundIdentifier?.({
+        generationId: generationMetadata?.generationId,
+        reservationIdentifier
+      }) ?? (normalizeMutationGenerationId(generationMetadata?.generationId) || reservationIdentifier);
+      const refundResult = await refundGenerationReservation(idempotencyKey, refundIdentifier);
       if (!refundResult.ok) {
         ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
       }
@@ -3165,14 +3233,18 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       };
     }
 
-    const completion = await completeGenerationReservation(idempotencyKey);
+    const completionGenerationId = normalizeMutationGenerationId(generationMetadata?.generationId);
+    const completion = await completeGenerationReservation(idempotencyKey, completionGenerationId);
     if (!completion.ok) {
       logImagePipelineError("generation completion failed after successful map generation", {
         idempotencyKey: redactIdempotencyKey(idempotencyKey),
+        generationId: redactIdempotencyKey(completionGenerationId),
         status: completion.status ?? 0,
         errorCode: completion.errorCode ?? ""
       });
-      scheduleCompletionRetry(idempotencyKey, 1);
+      if (completion.errorCode !== "MISSING_GENERATION_ID") {
+        scheduleCompletionRetry(idempotencyKey, completionGenerationId, 1);
+      }
     }
     await syncSubscriptionStatus({ notify: false });
 
@@ -3184,11 +3256,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       generationMetadata
     };
   } catch (error) {
-    const refundResult = await refundGenerationReservation(idempotencyKey);
+    const refundResult = await refundGenerationReservation(idempotencyKey, reservationIdentifier);
     if (!refundResult.ok) {
       ui.notifications.error(`SceneForge AI: Refund failed. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
       logImagePipelineError("generation refund failed after exception", {
         idempotencyKey: redactIdempotencyKey(idempotencyKey),
+        generationId: redactIdempotencyKey(reservationIdentifier),
         status: refundResult.status ?? 0,
         errorCode: refundResult.errorCode ?? ""
       });
