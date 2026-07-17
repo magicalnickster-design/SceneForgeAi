@@ -1387,6 +1387,10 @@ async function findReusableImageEntryForPrompt(prompt) {
       requirePositiveVote: true
     }
   });
+  if (Number(response.status) === 404) {
+    // 404 means no reusable image exists for this exact prompt.
+    return null;
+  }
   if (!response.ok) {
     throw new Error(`Global reuse lookup failed (${response.status || "network"}).`);
   }
