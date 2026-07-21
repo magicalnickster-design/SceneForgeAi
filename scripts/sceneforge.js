@@ -751,6 +751,10 @@ function getGenerationTransactionApi() {
   return getAuthApi()?.GenerationTransaction ?? null;
 }
 
+function clearTransientImageEditState() {
+  globalThis.__sceneforgeImageEditState = null;
+}
+
 async function callEntitlementMutationWithAuthRetry(operation, idempotencyKey, generationId = "") {
   const auth = getAuthApi();
   const client = auth?.AuthClient;
@@ -781,6 +785,49 @@ function normalizeMutationGenerationId(generationId) {
 function extractReservationIdentifier(payload) {
   return getGenerationTransactionApi()?.extractReservationIdentifier?.(payload)
     ?? "";
+}
+
+function buildTextToImageRequestPayload(compiledPrompt, options = {}) {
+  const normalizedPrompt = String(compiledPrompt ?? "").trim();
+  const parsedImageSize = parseImageSizeString(options.imageSize ?? "1536x1024");
+  const requestedPayload = {
+    prompt: normalizedPrompt,
+    size: String(options.imageSize ?? "1536x1024"),
+    orientation: String(options.imageOrientation ?? "landscape").trim().toLowerCase(),
+    width: parsedImageSize?.width ?? null,
+    height: parsedImageSize?.height ?? null,
+    seed: options.seed ?? null
+  };
+  const payloadBuilder = getGenerationTransactionApi()?.buildTextToImagePayload;
+  if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
+  return requestedPayload;
+}
+
+function logGeneratePayloadDiagnostics(payload, idempotencyKey) {
+  const transactionApi = getGenerationTransactionApi();
+  const summary = transactionApi?.buildGeneratePayloadSummary
+    ? transactionApi.buildGeneratePayloadSummary(payload, { idempotencyKey })
+    : {
+      fieldNames: Object.keys(payload ?? {}).sort(),
+      promptLength: String(payload?.prompt ?? "").length,
+      width: Number(payload?.width ?? 0),
+      height: Number(payload?.height ?? 0),
+      orientation: String(payload?.orientation ?? ""),
+      hasImageInputField: false,
+      imageInputFields: [],
+      idempotencyKey: redactIdempotencyKey(idempotencyKey)
+    };
+  console.info(`${MODULE_ID} | Generate payload summary`, summary);
+}
+
+function logEntitlementMutationFailure(label, result, idempotencyKey, generationId) {
+  logImagePipelineError(label, {
+    idempotencyKey: redactIdempotencyKey(idempotencyKey),
+    generationId: redactIdempotencyKey(generationId),
+    endpoint: String(result?.endpoint ?? ""),
+    status: Number(result?.status ?? 0),
+    errorCode: String(result?.errorCode ?? "")
+  });
 }
 
 async function completeGenerationReservation(idempotencyKey, generationId) {
@@ -850,17 +897,11 @@ function scheduleCompletionRetry(idempotencyKey, generationId, attempt = 1) {
   const retryApi = getGenerationTransactionApi();
   const retryContext = retryApi?.createCompletionRetryContext
     ? retryApi.createCompletionRetryContext(idempotencyKey, generationId, attempt)
-    : {
-      idempotencyKey: normalizeMutationGenerationId(idempotencyKey),
-      generationId: normalizeMutationGenerationId(generationId),
-      attempt: Number(attempt ?? 1)
-    };
+    : { idempotencyKey: normalizeMutationGenerationId(idempotencyKey), generationId: normalizeMutationGenerationId(generationId), attempt: Number(attempt ?? 1) };
   const mutationGenerationId = retryContext.generationId;
   const mutationIdempotencyKey = retryContext.idempotencyKey;
   if (!mutationGenerationId || !mutationIdempotencyKey) return;
-  const maxAttempts = 3;
-  if (retryContext.attempt > maxAttempts) return;
-  const waitMs = retryContext.attempt === 1 ? 2500 : 8000;
+  const waitMs = 2500;
   window.setTimeout(async () => {
     const retry = await completeGenerationReservation(mutationIdempotencyKey, mutationGenerationId);
     if (retry.ok) {
@@ -871,17 +912,17 @@ function scheduleCompletionRetry(idempotencyKey, generationId, attempt = 1) {
       });
       return;
     }
-    logImagePipelineError("generation completion retry failed", {
-      idempotencyKey: redactIdempotencyKey(mutationIdempotencyKey),
-      generationId: redactIdempotencyKey(mutationGenerationId),
+    const retryPlan = retryApi?.buildCompletionRetryPlan?.({
+      result: retry,
       attempt: retryContext.attempt,
-      status: retry.status ?? 0,
-      errorCode: retry.errorCode ?? ""
-    });
-    const next = retryApi?.nextCompletionRetryContext
-      ? retryApi.nextCompletionRetryContext(retryContext)
-      : { ...retryContext, attempt: retryContext.attempt + 1 };
-    scheduleCompletionRetry(next.idempotencyKey, next.generationId, next.attempt);
+      idempotencyKey: mutationIdempotencyKey,
+      generationId: mutationGenerationId
+    }) ?? null;
+    logEntitlementMutationFailure("generation completion retry failed", retry, mutationIdempotencyKey, mutationGenerationId);
+    ui.notifications.error(
+      retryPlan?.userMessage
+      || `SceneForge AI: Could not finalize usage tracking. Contact support with request key ${redactIdempotencyKey(mutationIdempotencyKey)}.`
+    );
   }, waitMs);
 }
 
@@ -2001,6 +2042,7 @@ function getSceneFromDirectoryLi(li) {
  * Open the generator dialog from our template.
  */
 async function openGeneratorDialog(initialState = null) {
+  clearTransientImageEditState();
   const renderTemplateCompat = getRenderTemplateFn();
   if (typeof renderTemplateCompat !== "function") {
     ui.notifications.error("SceneForge AI: Template renderer unavailable in this Foundry version.");
@@ -2038,6 +2080,8 @@ async function openGeneratorDialog(initialState = null) {
  */
 function wireAutoDetectUi(dialogHtml, initialState = null) {
   const form = dialogHtml.find(".sceneforge-form");
+  form.removeData("sceneforgeImageEditState");
+  form.removeData("sceneforgeEditSource");
 
   // Restore previous values if the dialog is reopened.
   applyGeneratorFormState(form, initialState);
@@ -2698,9 +2742,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
 
   const compiledPrompt = generationData.compiledImagePrompt ?? "";
   const imageResult = await generateAiMapImage(compiledPrompt, {
-    mode: "preview",
     seed: generationData.seed,
-    sourcePrompt: generationData.prompt ?? "",
     imageSize: generationData.imageSize ?? getRequestedImageSize(generationData.sceneSizeKey, generationData.imageOrientation),
     imageOrientation: generationData.imageOrientation ?? "landscape"
   });
@@ -3112,10 +3154,15 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   }
   const reservationIdentifier = extractReservationIdentifier(reserve?.payload);
   if (!reservationIdentifier) {
-    logImagePipelineError("consume response missing reservation identifier", {
-      idempotencyKey: redactIdempotencyKey(idempotencyKey),
-      payloadKeys: Object.keys(reserve?.payload ?? {})
-    });
+    logEntitlementMutationFailure("consume response missing reservation identifier", reserve, idempotencyKey, "");
+    ui.notifications.error(`SceneForge AI: Could not correlate generation reservation. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`);
+    return {
+      provider,
+      imageStatus: "failed",
+      imagePath: null,
+      costEstimate,
+      errorMessage: "Could not correlate generation reservation."
+    };
   }
 
   const subscriptionSync = await syncSubscriptionStatus({ notify: false });
@@ -3157,23 +3204,8 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   }
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
-  const normalizedPrompt = String(compiledPrompt ?? "").trim();
-  const parsedImageSize = parseImageSizeString(options.imageSize ?? "1536x1024");
-  const requestPayload = {
-    compiledPrompt: normalizedPrompt,
-    // Compatibility aliases for backend variants that expect generic keys.
-    prompt: normalizedPrompt,
-    input: normalizedPrompt,
-    seed: options.seed ?? null,
-    plan: options.plan ?? null,
-    layoutGraph: options.layoutGraph ?? null,
-    sourcePrompt: options.sourcePrompt ?? "",
-    imageSize: options.imageSize ?? "1536x1024",
-    imageOrientation: options.imageOrientation ?? "landscape",
-    width: parsedImageSize?.width ?? null,
-    height: parsedImageSize?.height ?? null
-  };
-  debugLog("Subscription generation request", { endpoint, requestPayload });
+  const requestPayload = buildTextToImageRequestPayload(compiledPrompt, options);
+  logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
 
   try {
     const response = await authFetch(endpoint, {
@@ -3187,10 +3219,9 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
 
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const failedGenerationId = String(payload?.generationId ?? payload?.id ?? payload?.result?.generationId ?? "").trim();
       await attemptRefundWithContract({
         idempotencyKey,
-        generationId: failedGenerationId,
+        generationId: reservationIdentifier,
         reservationIdentifier,
         reservationPayload: reserve?.payload,
         context: "generate_http_failure"
@@ -3266,7 +3297,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     if (!imagePath) {
       await attemptRefundWithContract({
         idempotencyKey,
-        generationId: generationMetadata?.generationId,
+        generationId: reservationIdentifier,
         reservationIdentifier,
         reservationPayload: reserve?.payload,
         context: "missing_image_path_after_generate"
@@ -3284,17 +3315,23 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       };
     }
 
-    const completionGenerationId = normalizeMutationGenerationId(generationMetadata?.generationId);
+    const completionGenerationId = normalizeMutationGenerationId(reservationIdentifier);
     const completion = await completeGenerationReservation(idempotencyKey, completionGenerationId);
     if (!completion.ok) {
-      logImagePipelineError("generation completion failed after successful map generation", {
-        idempotencyKey: redactIdempotencyKey(idempotencyKey),
-        generationId: redactIdempotencyKey(completionGenerationId),
-        status: completion.status ?? 0,
-        errorCode: completion.errorCode ?? ""
-      });
-      if (completion.errorCode !== "MISSING_GENERATION_ID") {
+      logEntitlementMutationFailure("generation completion failed after successful map generation", completion, idempotencyKey, completionGenerationId);
+      const completionPlan = getGenerationTransactionApi()?.buildCompletionRetryPlan?.({
+        result: completion,
+        attempt: 0,
+        idempotencyKey,
+        generationId: completionGenerationId
+      }) ?? null;
+      if (completionPlan?.shouldRetry) {
         scheduleCompletionRetry(idempotencyKey, completionGenerationId, 1);
+      } else if (completion.errorCode !== "MISSING_GENERATION_ID") {
+        ui.notifications.error(
+          completionPlan?.userMessage
+          || `SceneForge AI: Could not finalize usage tracking. Contact support with request key ${redactIdempotencyKey(idempotencyKey)}.`
+        );
       }
     }
     await syncSubscriptionStatus({ notify: false });
@@ -3309,6 +3346,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   } catch (error) {
     const refundResult = await attemptRefundWithContract({
       idempotencyKey,
+      generationId: reservationIdentifier,
       reservationIdentifier,
       reservationPayload: reserve?.payload,
       context: "generate_exception"
