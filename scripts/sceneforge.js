@@ -1,13 +1,6 @@
 /**
- * SceneForge AI (MVP+)
- * --------------------
- * This version keeps the original MVP behavior, then adds:
- *  - seeded deterministic generation
- *  - multiple themed layout variations
- *  - Scene directory context menu actions for image edit, preset IO, and voting
- *  - per-document flags so regeneration only removes SceneForge content
- *
- * There is still NO real AI call here. Layouts are template-driven.
+ * SceneForge AI module entrypoint.
+ * Includes map generation UI, scene creation, and supporting utilities.
  */
 
 const MODULE_ID = "sceneforge-ai";
@@ -27,10 +20,7 @@ const ENABLE_JOURNALS_AND_NOTES = false;
 // Product decision: do not generate procedural walls/lights over AI maps.
 const ENABLE_SCENE_WALLS_AND_LIGHTS = false;
 
-/**
- * Lightweight debug logger so noisy logs can stay disabled by default.
- * Set DEBUG = true while developing/troubleshooting.
- */
+/** Debug logger controlled by the DEBUG flag. */
 function debugLog(...args) {
   if (!DEBUG) return;
   console.log(`${MODULE_ID} |`, ...args);
@@ -560,13 +550,6 @@ const AI_PLANNER_TERRAIN_FEATURES = [
 
 const AI_PLANNER_LIGHTING_MOODS = ["bright", "dim", "dark", "magical", "torchlit"];
 
-/**
- * Settings keys for optional premium-style asset packs.
- * Base assets are always included and do not need a setting.
- */
-const SETTING_PREMIUM_TAVERN_PACK = "enablePremiumTavernPack";
-const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
-const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
 const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
 const SETTING_OPENAI_API_KEY = "openAiApiKey";
 const SETTING_BFL_API_KEY = "bflApiKey";
@@ -988,33 +971,6 @@ async function enforceProductionSettingsDefaults() {
  * Location in Foundry: Game Settings -> Configure Settings -> Module Settings.
  */
 function registerAssetPackSettings() {
-  game.settings.register(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK, {
-    name: "Premium Tavern Pack",
-    hint: "Enable additive tavern assets from /assets/premium/tavern/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
-  game.settings.register(MODULE_ID, SETTING_DARK_DUNGEON_PACK, {
-    name: "Dark Dungeon Pack",
-    hint: "Enable additive dungeon assets from /assets/premium/dark-dungeon/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
-  game.settings.register(MODULE_ID, SETTING_RUNE_RUINS_PACK, {
-    name: "Rune Ruins Pack",
-    hint: "Enable additive forest ruins assets from /assets/premium/rune-ruins/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
     hint: "SceneForge Cloud provider (BFL via backend).",
@@ -1156,59 +1112,18 @@ function registerAssetPackSettings() {
   });
 }
 
-/**
- * Merge base registry + enabled pack registries into one active registry.
- *
- * Beginner note:
- * To add a new future subscriber pack:
- *  1) create a new <packName>Registry object with theme arrays
- *  2) register a module setting toggle
- *  3) include the registry in this function when toggle is enabled
- */
-function getActiveAssetRegistry(forcedEnabledPackIds = null) {
-  const merged = cloneRegistryWithPackMeta(baseRegistry, "base");
-
-  if (isAssetPackEnabled("premium-tavern", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(premiumTavernRegistry, "premium-tavern"));
-  }
-  if (isAssetPackEnabled("dark-dungeon", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(darkDungeonRegistry, "dark-dungeon"));
-  }
-  if (isAssetPackEnabled("rune-ruins", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(runeRuinsRegistry, "rune-ruins"));
-  }
-
-  return merged;
+function getActiveAssetRegistry(_forcedEnabledPackIds = null) {
+  return cloneRegistryWithPackMeta(baseRegistry, "base");
 }
 
-/**
- * Supports either explicit pack IDs (preset import) or world settings toggles.
- */
-function isAssetPackEnabled(packId, forcedEnabledPackIds) {
-  if (Array.isArray(forcedEnabledPackIds)) {
-    return forcedEnabledPackIds.includes(packId);
-  }
-
-  if (packId === "premium-tavern") return game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK);
-  if (packId === "dark-dungeon") return game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK);
-  if (packId === "rune-ruins") return game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK);
-  return false;
-}
-
-/**
- * Returns active non-base pack IDs, useful for debugging and scene flags.
- */
+/** Returns active optional pack IDs. */
 function getEnabledAssetPackIds() {
-  const packIds = [];
-  if (game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK)) packIds.push("premium-tavern");
-  if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) packIds.push("dark-dungeon");
-  if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) packIds.push("rune-ruins");
-  return packIds;
+  return [];
 }
 
 function getAiImageProvider() {
   const provider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
-  // Customer mode always routes image generation through subscription backend.
+  // Current production flow routes generation through the subscription backend.
   if (provider === "black-forest-labs" || provider === "subscription") return "subscription";
   return "subscription";
 }
@@ -1745,10 +1660,7 @@ async function incrementOpenAiUsageCount() {
   return next;
 }
 
-/**
- * Requirement helper:
- * Compare preset.required packs against currently enabled packs.
- */
+/** Compare preset-required packs against currently enabled packs. */
 function getMissingPresetPacks(preset) {
   const requiredPacks = Array.isArray(preset?.enabledAssetPacks)
     ? preset.enabledAssetPacks.filter((v) => typeof v === "string")
@@ -1942,7 +1854,9 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
   if (!rootElement) return;
   if (rootElement.querySelector(".sceneforge-auth-actions")) return;
 
-  const anchorInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_RUNE_RUINS_PACK}"]`);
+  const anchorInput = rootElement.querySelector(
+    `[name="${MODULE_ID}.${SETTING_AUTO_ACTIVATE_GENERATED_SCENE}"],[name^="${MODULE_ID}."]`
+  );
   const anchorGroup = anchorInput?.closest(".form-group");
   if (!anchorGroup) return;
 
@@ -2086,6 +2000,7 @@ async function openGeneratorDialog(initialState = null) {
   const dialog = new Dialog({
     title: "SceneForge AI - Generate Map",
     content,
+    classes: ["sceneforge-generator-dialog"],
     buttons: {
       generate: {
         icon: '<i class="fas fa-wand-magic-sparkles"></i>',
@@ -2101,6 +2016,10 @@ async function openGeneratorDialog(initialState = null) {
     },
     default: "generate",
     render: (dialogHtml) => {
+      const dialogWindow = dialogHtml?.closest?.(".app.window-app");
+      if (dialogWindow?.length) {
+        dialogWindow.addClass("sceneforge-generator-dialog");
+      }
       wireAutoDetectUi(dialogHtml, initialState);
     }
   });
@@ -2129,6 +2048,7 @@ function applyGeneratorFormState(form, state) {
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
   if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
   if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
+  if (typeof state.buildingViewMode === "string") form.find('[name="buildingViewMode"]').val(state.buildingViewMode);
 }
 
 /**
@@ -2181,6 +2101,7 @@ function buildGenerationConfigFromForm(form) {
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
+  const buildingViewMode = String(form.find('[name="buildingViewMode"]').val() ?? "interior").trim().toLowerCase();
   const orientationSpec = getImageOrientationSpec(imageOrientation);
   const requestedImageSize = getRequestedImageSize(sceneSizeKey, imageOrientation);
   const theme = "ai-map";
@@ -2198,7 +2119,8 @@ function buildGenerationConfigFromForm(form) {
   const compiledImagePrompt = compileInkarnatePrompt(prompt, {
     imageOrientation,
     sceneSizeKey,
-    mapCoverageMeters
+    mapCoverageMeters,
+    buildingViewMode
   });
 
   const generationData = {
@@ -2206,6 +2128,7 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     sceneSizeKey,
     imageOrientation,
+    buildingViewMode,
     imageSize: requestedImageSize,
     mapCoverageMeters,
     theme,
@@ -2236,7 +2159,8 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     seed,
     mapScale: sceneSizeKey,
-    imageOrientation
+    imageOrientation,
+    buildingViewMode
   };
 
   return {
@@ -2246,10 +2170,7 @@ function buildGenerationConfigFromForm(form) {
   };
 }
 
-/**
- * Requirement helper:
- * Estimate object counts and summarize final generation state before creation.
- */
+/** Estimate object counts and summarize generation state before creation. */
 function buildGenerationPreviewData(config) {
   const generationData = config.generationData;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
@@ -2726,7 +2647,6 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
   } catch (error) {
     logImagePipelineError("global reuse lookup failed", { prompt: generationData?.prompt ?? "" }, error);
-    ui.notifications.warn("SceneForge AI: Global cache lookup failed. Proceeding with new image generation.");
     reusableEntry = null;
   }
   if (reusableEntry) {
@@ -3112,13 +3032,9 @@ async function openSceneImageEditDialog(scene) {
   dialog.render(true);
 }
 
-/**
- * Provider architecture router.
- * Real generation is currently enabled only for the OpenAI provider path.
- */
+/** Provider router for map image generation. */
 async function generateAiMapImage(compiledPrompt, options = {}) {
-  // Production hard-lock: all generation goes through subscription backend,
-  // where BFL keys are server-side only.
+  // Route generation through the subscription backend.
   const provider = "subscription";
   console.info(`${MODULE_ID} | AI image provider selected: ${provider}`);
   return generateSubscriptionMapImage(compiledPrompt, options);
@@ -5284,6 +5200,10 @@ function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const buildingViewMode = String(options.buildingViewMode ?? "interior").trim().toLowerCase();
+  const buildingViewLine = buildingViewMode === "roofs-no-interior"
+    ? "BUILDINGS MUST SHOW ROOFS ONLY; DO NOT SHOW INTERIOR ROOMS, INTERIOR WALLS, OR INTERIOR FURNITURE"
+    : "BUILDINGS MUST SHOW TOP-DOWN INTERIOR FLOORPLANS WITH LOGICAL ROOM SHAPES, WALL CONNECTIONS, AND DOOR PLACEMENT";
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
@@ -5296,6 +5216,10 @@ function compileInkarnatePrompt(prompt, options = {}) {
     "NO ELEVATION VIEW, NO HORIZON, NO ANGLED ARCHITECTURE",
     "ALL DOORS, WINDOWS, AND WALLS MUST BE DRAWN AS TOP-DOWN SYMBOLS, NOT SIDE VIEWS",
     "IF A STRUCTURE APPEARS, FORCE IT INTO FLAT TOP-DOWN ROOF OR FLOOR FOOTPRINT",
+    buildingViewLine,
+    "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
+    "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
+    "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",
     orientationSpec.promptLine,
     ...scaleLines,
     "GRIDLESS",
@@ -5345,10 +5269,7 @@ function detectDirectionalPosition(text, subject, fallback = "center") {
   return fallback;
 }
 
-/**
- * Parse a natural-language prompt using local keyword rules only.
- * No external API calls are made.
- */
+/** Parse a natural-language prompt using local keyword rules. */
 function parsePromptForSceneSettings(prompt) {
   void prompt;
   const features = {
