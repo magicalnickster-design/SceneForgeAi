@@ -165,6 +165,16 @@
   transition: border-color 130ms ease, box-shadow 130ms ease, background-color 130ms ease;
 }
 
+.sceneforge-generator-dialog .sceneforge-form select {
+  color-scheme: dark;
+}
+
+.sceneforge-generator-dialog .sceneforge-form select option,
+.sceneforge-generator-dialog .sceneforge-form select optgroup {
+  background: #090d1f;
+  color: #f3f6ff;
+}
+
 .sceneforge-generator-dialog .sceneforge-form textarea {
   min-height: 108px;
   resize: vertical;
