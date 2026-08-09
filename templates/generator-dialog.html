@@ -1,6 +1,6 @@
-<form class="sceneforge-form">
-  <div class="form-group">
-    <label for="sf-prompt">Prompt</label>
+<form class="sceneforge-form sceneforge-generate-form">
+  <div class="form-group sceneforge-field sceneforge-field-prompt">
+    <label for="sf-prompt" class="sceneforge-field-label">Prompt</label>
     <textarea
       id="sf-prompt"
       name="prompt"
@@ -8,45 +8,45 @@
       placeholder="Example: Forest road through tall pines with a small creek crossing and mossy stones."
       required
     ></textarea>
-    <p class="notes">
+    <p class="notes sceneforge-field-notes">
       Describe the map you want in plain language.
     </p>
   </div>
 
-  <div class="form-group">
-    <label for="sf-seed">Random Seed (optional)</label>
+  <div class="form-group sceneforge-field">
+    <label for="sf-seed" class="sceneforge-field-label">Random Seed (optional)</label>
     <input
       id="sf-seed"
       name="seed"
       type="text"
       placeholder="Leave blank to auto-generate a seed"
     />
-    <p class="notes">
+    <p class="notes sceneforge-field-notes">
       Seed is reserved for future reproducibility controls.
     </p>
   </div>
 
-  <div class="form-group">
-    <label for="sf-map-scale">Map Size</label>
+  <div class="form-group sceneforge-field">
+    <label for="sf-map-scale" class="sceneforge-field-label">Map Size</label>
     <select id="sf-map-scale" name="mapScale">
       <option value="small">Small (~50m battle map)</option>
       <option value="medium" selected>Medium (~250m local area)</option>
       <option value="large">Large (~800m district scale)</option>
       <option value="xlarge">Extra Large (~1 mile regional map)</option>
     </select>
-    <p class="notes">
+    <p class="notes sceneforge-field-notes">
       Sets approximate real-world map coverage in meters.
     </p>
   </div>
 
-  <div class="form-group">
-    <label for="sf-image-orientation">Image Orientation</label>
+  <div class="form-group sceneforge-field">
+    <label for="sf-image-orientation" class="sceneforge-field-label">Image Orientation</label>
     <select id="sf-image-orientation" name="imageOrientation">
       <option value="landscape" selected>Landscape</option>
       <option value="square">Square</option>
       <option value="portrait">Portrait</option>
     </select>
-    <p class="notes">
+    <p class="notes sceneforge-field-notes">
       Most encounter maps work best in landscape or portrait formats.
     </p>
   </div>

@@ -69,3 +69,192 @@
   border-radius: 4px;
   padding: 0.45rem 0.55rem;
 }
+
+/* Scoped premium dialog styling for SceneForge map generation only. */
+.sceneforge-generator-dialog {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow:
+    0 20px 45px rgba(3, 8, 22, 0.65),
+    0 4px 12px rgba(90, 59, 173, 0.18);
+  border: 1px solid rgba(124, 89, 214, 0.35);
+}
+
+.sceneforge-generator-dialog::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: 16px;
+  background: linear-gradient(
+    120deg,
+    rgba(141, 89, 255, 0.65) 0%,
+    rgba(124, 83, 211, 0.48) 30%,
+    rgba(85, 108, 255, 0.5) 60%,
+    rgba(122, 86, 236, 0.56) 100%
+  );
+  background-size: 220% 220%;
+  animation: sceneforge-magical-border 16s ease-in-out infinite;
+  filter: blur(0.2px);
+}
+
+.sceneforge-generator-dialog > * {
+  position: relative;
+  z-index: 1;
+}
+
+.sceneforge-generator-dialog .window-header {
+  background:
+    linear-gradient(180deg, rgba(15, 20, 42, 0.98) 0%, rgba(9, 12, 28, 0.98) 100%);
+  border-bottom: 1px solid rgba(112, 85, 204, 0.35);
+  color: #e9edff;
+}
+
+.sceneforge-generator-dialog .window-title {
+  color: #d8c2ff;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sceneforge-generator-dialog .window-content {
+  padding: 16px;
+  background:
+    radial-gradient(120% 100% at 0% 0%, rgba(82, 56, 150, 0.2) 0%, rgba(9, 12, 28, 0) 45%),
+    radial-gradient(130% 100% at 100% 100%, rgba(56, 88, 175, 0.12) 0%, rgba(7, 10, 24, 0) 42%),
+    linear-gradient(180deg, rgba(8, 12, 30, 0.97) 0%, rgba(5, 8, 20, 0.98) 100%);
+}
+
+.sceneforge-generator-dialog .sceneforge-generate-form {
+  display: grid;
+  gap: 12px;
+}
+
+.sceneforge-generator-dialog .sceneforge-field {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(105, 95, 155, 0.35);
+  background: linear-gradient(180deg, rgba(21, 27, 53, 0.52) 0%, rgba(10, 15, 35, 0.55) 100%);
+  box-shadow: inset 0 1px 0 rgba(170, 184, 255, 0.08);
+}
+
+.sceneforge-generator-dialog .sceneforge-field-prompt {
+  padding-top: 12px;
+}
+
+.sceneforge-generator-dialog .sceneforge-field-label {
+  display: block;
+  margin: 0 0 7px;
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: #f2f5ff;
+  letter-spacing: 0.015em;
+}
+
+.sceneforge-generator-dialog .sceneforge-form textarea,
+.sceneforge-generator-dialog .sceneforge-form input[type="text"],
+.sceneforge-generator-dialog .sceneforge-form select {
+  width: 100%;
+  border-radius: 9px;
+  border: 1px solid rgba(115, 117, 168, 0.45);
+  background: rgba(8, 12, 30, 0.78);
+  color: #ecf1ff;
+  box-shadow: inset 0 0 0 1px rgba(31, 42, 88, 0.32);
+  transition: border-color 130ms ease, box-shadow 130ms ease, background-color 130ms ease;
+}
+
+.sceneforge-generator-dialog .sceneforge-form textarea {
+  min-height: 108px;
+  resize: vertical;
+}
+
+.sceneforge-generator-dialog .sceneforge-form textarea::placeholder,
+.sceneforge-generator-dialog .sceneforge-form input[type="text"]::placeholder {
+  color: rgba(199, 205, 225, 0.65);
+}
+
+.sceneforge-generator-dialog .sceneforge-form textarea:focus,
+.sceneforge-generator-dialog .sceneforge-form input[type="text"]:focus,
+.sceneforge-generator-dialog .sceneforge-form select:focus {
+  outline: none;
+  border-color: rgba(165, 125, 255, 0.85);
+  box-shadow:
+    0 0 0 1px rgba(146, 103, 255, 0.5),
+    0 0 12px rgba(130, 89, 230, 0.3);
+  background: rgba(10, 14, 36, 0.92);
+}
+
+.sceneforge-generator-dialog .sceneforge-field-notes {
+  margin: 7px 0 0;
+  color: rgba(184, 191, 212, 0.86);
+  font-size: 0.88rem;
+  line-height: 1.32;
+}
+
+.sceneforge-generator-dialog .dialog-buttons {
+  margin-top: 12px;
+  gap: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.sceneforge-generator-dialog .dialog-buttons button {
+  height: 44px;
+  border-radius: 10px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  border: 1px solid rgba(122, 127, 172, 0.48);
+  color: #eef2ff;
+  background: linear-gradient(180deg, rgba(16, 21, 47, 0.9) 0%, rgba(11, 14, 34, 0.9) 100%);
+  box-shadow: inset 0 1px 0 rgba(225, 228, 255, 0.08);
+}
+
+.sceneforge-generator-dialog .dialog-buttons button:hover {
+  border-color: rgba(154, 120, 240, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 0 0 1px rgba(111, 135, 245, 0.16);
+}
+
+.sceneforge-generator-dialog .dialog-buttons .default,
+.sceneforge-generator-dialog .dialog-buttons button[data-button="generate"] {
+  border-color: rgba(154, 110, 255, 0.8);
+  color: #f5f0ff;
+  background:
+    radial-gradient(130% 100% at 15% 0%, rgba(175, 120, 255, 0.28) 0%, rgba(89, 53, 171, 0) 60%),
+    linear-gradient(180deg, rgba(106, 58, 204, 0.93) 0%, rgba(73, 42, 150, 0.95) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(244, 232, 255, 0.2),
+    0 0 14px rgba(122, 70, 218, 0.35),
+    0 0 24px rgba(67, 108, 255, 0.22);
+}
+
+.sceneforge-generator-dialog .dialog-buttons .default:hover,
+.sceneforge-generator-dialog .dialog-buttons button[data-button="generate"]:hover {
+  border-color: rgba(188, 152, 255, 0.95);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 248, 255, 0.24),
+    0 0 20px rgba(145, 90, 243, 0.42),
+    0 0 26px rgba(84, 124, 255, 0.25);
+}
+
+@keyframes sceneforge-magical-border {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sceneforge-generator-dialog::before {
+    animation: none;
+  }
+}
