@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const transactionApi = require("../scripts/auth/generation-transaction.js");
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function loadAuthClientWithFetch(fetchImpl) {
   const source = fs.readFileSync(path.join(__dirname, "..", "scripts", "auth", "auth-client.js"), "utf8");
@@ -311,4 +312,40 @@ test("completion 404 not found allows one retry then stops with diagnostics", ()
   assert.equal(secondAttempt.reason, "generation_request_not_found");
   assert.match(secondAttempt.userMessage, /Contact support with request key idem\*\*\*1234/);
   assert.equal(secondAttempt.diagnostic.status, 404);
+});
+
+test("createUuidV4 uses native crypto.randomUUID when available", () => {
+  const nativeUuid = "123e4567-e89b-42d3-a456-426614174000";
+  const uuid = transactionApi.createUuidV4({
+    cryptoObject: {
+      randomUUID: () => nativeUuid,
+      getRandomValues: () => {
+        throw new Error("getRandomValues should not be called when randomUUID is valid");
+      }
+    }
+  });
+  assert.equal(uuid, nativeUuid);
+  assert.match(uuid, UUID_V4_REGEX);
+});
+
+test("createUuidV4 uses crypto.getRandomValues fallback and sets v4 bits", () => {
+  const uuid = transactionApi.createUuidV4({
+    cryptoObject: {
+      getRandomValues: (buffer) => {
+        for (let i = 0; i < buffer.length; i += 1) buffer[i] = i;
+        return buffer;
+      }
+    }
+  });
+  assert.equal(uuid, "00010203-0405-4607-8809-0a0b0c0d0e0f");
+  assert.match(uuid, UUID_V4_REGEX);
+});
+
+test("createUuidV4 uses Math.random byte fallback when crypto APIs unavailable", () => {
+  const uuid = transactionApi.createUuidV4({
+    cryptoObject: {},
+    mathRandom: () => 0
+  });
+  assert.equal(uuid, "00000000-0000-4000-8000-000000000000");
+  assert.match(uuid, UUID_V4_REGEX);
 });

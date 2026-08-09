@@ -1,4 +1,5 @@
 (() => {
+  const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const IMAGE_INPUT_FIELDS = [
     "image",
     "inputImage",
@@ -13,6 +14,50 @@
 
   function normalizeGenerationId(value) {
     return String(value ?? "").trim();
+  }
+
+  function isUuidV4(value) {
+    return UUID_V4_REGEX.test(String(value ?? "").trim());
+  }
+
+  function bytesToUuidV4(bytes) {
+    const normalized = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes ?? []);
+    if (normalized.length < 16) {
+      throw new Error("UUID byte source must contain 16 bytes.");
+    }
+    normalized[6] = (normalized[6] & 0x0f) | 0x40;
+    normalized[8] = (normalized[8] & 0x3f) | 0x80;
+    const hex = Array.from(normalized, (byte) => byte.toString(16).padStart(2, "0"));
+    return [
+      hex.slice(0, 4).join(""),
+      hex.slice(4, 6).join(""),
+      hex.slice(6, 8).join(""),
+      hex.slice(8, 10).join(""),
+      hex.slice(10, 16).join("")
+    ].join("-");
+  }
+
+  function createUuidV4({ cryptoObject, mathRandom } = {}) {
+    const cryptoLike = cryptoObject ?? globalThis.crypto ?? null;
+    const randomFn = typeof mathRandom === "function" ? mathRandom : Math.random;
+    if (cryptoLike && typeof cryptoLike.randomUUID === "function") {
+      const nativeId = String(cryptoLike.randomUUID() ?? "").trim();
+      if (isUuidV4(nativeId)) return nativeId.toLowerCase();
+    }
+
+    const bytes = new Uint8Array(16);
+    if (cryptoLike && typeof cryptoLike.getRandomValues === "function") {
+      try {
+        cryptoLike.getRandomValues(bytes);
+        return bytesToUuidV4(bytes);
+      } catch (_error) {
+        // Fall through to Math.random fallback.
+      }
+    }
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(randomFn() * 256) & 0xff;
+    }
+    return bytesToUuidV4(bytes);
   }
 
   function isFiniteNumber(value) {
@@ -203,6 +248,9 @@
 
   const api = {
     normalizeGenerationId,
+    isUuidV4,
+    bytesToUuidV4,
+    createUuidV4,
     extractReservationIdentifier,
     resolveRefundIdentifier,
     redactSupportKey,
