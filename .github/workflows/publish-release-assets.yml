@@ -39,11 +39,10 @@ jobs:
           zip -r "sceneforge-ai.zip" module.json README.md scripts styles templates
 
       - name: Create or update GitHub release assets
-        uses: softprops/action-gh-release@v2
+        uses: ncipollo/release-action@v1
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: SceneForgeAI ${{ steps.release_meta.outputs.tag }}
-          files: |
-            module.json
-            sceneforge-ai.zip
-          overwrite_files: true
+          artifacts: "module.json,sceneforge-ai.zip"
+          allowUpdates: true
+          replacesArtifacts: true
