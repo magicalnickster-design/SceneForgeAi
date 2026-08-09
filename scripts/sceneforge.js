@@ -575,6 +575,7 @@ const SETTING_CONFIRM_PAID_GENERATION = "confirmBeforePaidGeneration";
 const SETTING_OPENAI_USAGE_TRACKING = "openAiUsageTracking";
 const SETTING_SUBSCRIPTION_BACKEND_URL = "subscriptionBackendUrl";
 const SETTING_AUTH_API_BASE_URL = "gambitsAuthApiBaseUrl";
+const SETTING_AUTO_ACTIVATE_GENERATED_SCENE = "autoActivateGeneratedScene";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
@@ -1027,6 +1028,15 @@ function registerAssetPackSettings() {
     restricted: true
   });
 
+  game.settings.register(MODULE_ID, SETTING_AUTO_ACTIVATE_GENERATED_SCENE, {
+    name: "Auto-Activate Generated Scene",
+    hint: "Automatically activate and display the new Scene when map generation finishes.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true
+  });
+
   game.settings.register(MODULE_ID, SETTING_AUTH_API_BASE_URL, {
     name: "Gambits Auth API Base URL",
     hint: "Auth + entitlement API base URL for Gambits Forge account and quota routes.",
@@ -1194,6 +1204,10 @@ function getBflApiKey() {
 
 function getSubscriptionBackendUrl() {
   return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
+}
+
+function shouldAutoActivateGeneratedScene() {
+  return game.settings.get(MODULE_ID, SETTING_AUTO_ACTIVATE_GENERATED_SCENE) !== false;
 }
 
 function getSubscriptionAuthToken() {
@@ -2644,10 +2658,12 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (shouldShowCreatedSuccess) {
       ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
     }
-    try {
-      await scene.activate();
-    } catch (_activateError) {
-      // Non-fatal: scene already exists even if activation fails.
+    if (shouldAutoActivateGeneratedScene()) {
+      try {
+        await scene.activate();
+      } catch (_activateError) {
+        // Non-fatal: scene already exists even if activation fails.
+      }
     }
     await promptForGeneratedSceneVote(scene);
   } catch (error) {
