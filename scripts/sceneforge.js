@@ -2134,6 +2134,7 @@ function applyGeneratorFormState(form, state) {
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
   if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
   if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
+  if (typeof state.buildingViewMode === "string") form.find('[name="buildingViewMode"]').val(state.buildingViewMode);
 }
 
 /**
@@ -2186,6 +2187,7 @@ function buildGenerationConfigFromForm(form) {
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
+  const buildingViewMode = String(form.find('[name="buildingViewMode"]').val() ?? "interior").trim().toLowerCase();
   const orientationSpec = getImageOrientationSpec(imageOrientation);
   const requestedImageSize = getRequestedImageSize(sceneSizeKey, imageOrientation);
   const theme = "ai-map";
@@ -2203,7 +2205,8 @@ function buildGenerationConfigFromForm(form) {
   const compiledImagePrompt = compileInkarnatePrompt(prompt, {
     imageOrientation,
     sceneSizeKey,
-    mapCoverageMeters
+    mapCoverageMeters,
+    buildingViewMode
   });
 
   const generationData = {
@@ -2211,6 +2214,7 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     sceneSizeKey,
     imageOrientation,
+    buildingViewMode,
     imageSize: requestedImageSize,
     mapCoverageMeters,
     theme,
@@ -2241,7 +2245,8 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     seed,
     mapScale: sceneSizeKey,
-    imageOrientation
+    imageOrientation,
+    buildingViewMode
   };
 
   return {
@@ -5288,6 +5293,10 @@ function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const buildingViewMode = String(options.buildingViewMode ?? "interior").trim().toLowerCase();
+  const buildingViewLine = buildingViewMode === "roofs-no-interior"
+    ? "BUILDINGS MUST SHOW ROOFS ONLY; DO NOT SHOW INTERIOR ROOMS, INTERIOR WALLS, OR INTERIOR FURNITURE"
+    : "BUILDINGS MUST SHOW TOP-DOWN INTERIOR FLOORPLANS WITH LOGICAL ROOM SHAPES, WALL CONNECTIONS, AND DOOR PLACEMENT";
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
@@ -5300,6 +5309,10 @@ function compileInkarnatePrompt(prompt, options = {}) {
     "NO ELEVATION VIEW, NO HORIZON, NO ANGLED ARCHITECTURE",
     "ALL DOORS, WINDOWS, AND WALLS MUST BE DRAWN AS TOP-DOWN SYMBOLS, NOT SIDE VIEWS",
     "IF A STRUCTURE APPEARS, FORCE IT INTO FLAT TOP-DOWN ROOF OR FLOOR FOOTPRINT",
+    buildingViewLine,
+    "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
+    "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
+    "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",
     orientationSpec.promptLine,
     ...scaleLines,
     "GRIDLESS",
