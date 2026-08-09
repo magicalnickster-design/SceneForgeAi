@@ -2086,6 +2086,7 @@ async function openGeneratorDialog(initialState = null) {
   const dialog = new Dialog({
     title: "SceneForge AI - Generate Map",
     content,
+    classes: ["sceneforge-generator-dialog"],
     buttons: {
       generate: {
         icon: '<i class="fas fa-wand-magic-sparkles"></i>',
@@ -2101,8 +2102,6 @@ async function openGeneratorDialog(initialState = null) {
     },
     default: "generate",
     render: (dialogHtml) => {
-      const root = dialogHtml.closest(".window-app, .app");
-      root.addClass("sceneforge-generator-dialog");
       wireAutoDetectUi(dialogHtml, initialState);
     }
   });
