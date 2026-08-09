@@ -2,7 +2,7 @@
   "id": "sceneforge-ai",
   "title": "SceneForge AI",
   "description": "MVP module that generates a basic playable scene from a GM prompt.",
-  "version": "0.21.0",
+  "version": "1.13",
   "authors": [
     {
       "name": "SceneForge AI Team"
@@ -29,7 +29,7 @@
   "socket": false,
   "url": "https://github.com/magicalnickster-design/SceneForgeAi",
   "manifest": "https://raw.githubusercontent.com/magicalnickster-design/SceneForgeAi/main/module.json",
-  "download": "https://github.com/magicalnickster-design/SceneForgeAi/releases/latest/download/sceneforge-ai.zip",
+  "download": "https://github.com/magicalnickster-design/SceneForgeAi/releases/download/1.0/SceneForge-AI.zip",
   "license": "MIT",
   "readme": "README.md"
 }
