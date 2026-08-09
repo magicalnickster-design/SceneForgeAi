@@ -2102,9 +2102,9 @@ async function openGeneratorDialog(initialState = null) {
     },
     default: "generate",
     render: (dialogHtml) => {
-      const dialogElement = dialogHtml?.[0]?.closest?.(".window-app, .dialog, .app");
-      if (dialogElement?.classList) {
-        dialogElement.classList.add("sceneforge-generator-dialog");
+      const dialogWindow = dialogHtml?.closest?.(".app.window-app");
+      if (dialogWindow?.length) {
+        dialogWindow.addClass("sceneforge-generator-dialog");
       }
       wireAutoDetectUi(dialogHtml, initialState);
     }
