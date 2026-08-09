@@ -1,13 +1,6 @@
 /**
- * SceneForge AI (MVP+)
- * --------------------
- * This version keeps the original MVP behavior, then adds:
- *  - seeded deterministic generation
- *  - multiple themed layout variations
- *  - Scene directory context menu actions for image edit, preset IO, and voting
- *  - per-document flags so regeneration only removes SceneForge content
- *
- * There is still NO real AI call here. Layouts are template-driven.
+ * SceneForge AI module entrypoint.
+ * Includes map generation UI, scene creation, and supporting utilities.
  */
 
 const MODULE_ID = "sceneforge-ai";
@@ -27,10 +20,7 @@ const ENABLE_JOURNALS_AND_NOTES = false;
 // Product decision: do not generate procedural walls/lights over AI maps.
 const ENABLE_SCENE_WALLS_AND_LIGHTS = false;
 
-/**
- * Lightweight debug logger so noisy logs can stay disabled by default.
- * Set DEBUG = true while developing/troubleshooting.
- */
+/** Debug logger controlled by the DEBUG flag. */
 function debugLog(...args) {
   if (!DEBUG) return;
   console.log(`${MODULE_ID} |`, ...args);
@@ -1126,16 +1116,14 @@ function getActiveAssetRegistry(_forcedEnabledPackIds = null) {
   return cloneRegistryWithPackMeta(baseRegistry, "base");
 }
 
-/**
- * Returns active non-base pack IDs, useful for debugging and scene flags.
- */
+/** Returns active optional pack IDs. */
 function getEnabledAssetPackIds() {
   return [];
 }
 
 function getAiImageProvider() {
   const provider = String(game.settings.get(MODULE_ID, SETTING_AI_IMAGE_PROVIDER) ?? "subscription").trim().toLowerCase();
-  // Customer mode always routes image generation through subscription backend.
+  // Current production flow routes generation through the subscription backend.
   if (provider === "black-forest-labs" || provider === "subscription") return "subscription";
   return "subscription";
 }
@@ -1672,10 +1660,7 @@ async function incrementOpenAiUsageCount() {
   return next;
 }
 
-/**
- * Requirement helper:
- * Compare preset.required packs against currently enabled packs.
- */
+/** Compare preset-required packs against currently enabled packs. */
 function getMissingPresetPacks(preset) {
   const requiredPacks = Array.isArray(preset?.enabledAssetPacks)
     ? preset.enabledAssetPacks.filter((v) => typeof v === "string")
@@ -2185,10 +2170,7 @@ function buildGenerationConfigFromForm(form) {
   };
 }
 
-/**
- * Requirement helper:
- * Estimate object counts and summarize final generation state before creation.
- */
+/** Estimate object counts and summarize generation state before creation. */
 function buildGenerationPreviewData(config) {
   const generationData = config.generationData;
   const gridCells = SCENE_SIZES[generationData.sceneSizeKey] ?? SCENE_SIZES.medium;
@@ -3050,13 +3032,9 @@ async function openSceneImageEditDialog(scene) {
   dialog.render(true);
 }
 
-/**
- * Provider architecture router.
- * Real generation is currently enabled only for the OpenAI provider path.
- */
+/** Provider router for map image generation. */
 async function generateAiMapImage(compiledPrompt, options = {}) {
-  // Production hard-lock: all generation goes through subscription backend,
-  // where BFL keys are server-side only.
+  // Route generation through the subscription backend.
   const provider = "subscription";
   console.info(`${MODULE_ID} | AI image provider selected: ${provider}`);
   return generateSubscriptionMapImage(compiledPrompt, options);
@@ -5291,10 +5269,7 @@ function detectDirectionalPosition(text, subject, fallback = "center") {
   return fallback;
 }
 
-/**
- * Parse a natural-language prompt using local keyword rules only.
- * No external API calls are made.
- */
+/** Parse a natural-language prompt using local keyword rules. */
 function parsePromptForSceneSettings(prompt) {
   void prompt;
   const features = {
