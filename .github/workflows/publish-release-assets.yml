@@ -43,6 +43,8 @@ jobs:
         with:
           tag: ${{ steps.release_meta.outputs.tag }}
           name: SceneForgeAI ${{ steps.release_meta.outputs.tag }}
-          artifacts: "module.json,sceneforge-ai.zip"
+          artifacts: |
+            module.json
+            sceneforge-ai.zip
           allowUpdates: true
           replacesArtifacts: true
