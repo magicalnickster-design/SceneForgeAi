@@ -72,37 +72,13 @@
 
 /* Scoped premium dialog styling for SceneForge map generation only. */
 .sceneforge-generator-dialog {
-  position: relative;
   border-radius: 14px;
   overflow: hidden;
   box-shadow:
     0 20px 45px rgba(3, 8, 22, 0.65),
     0 4px 12px rgba(90, 59, 173, 0.18);
-  border: 1px solid rgba(124, 89, 214, 0.35);
-}
-
-.sceneforge-generator-dialog::before {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  z-index: 0;
-  pointer-events: none;
-  border-radius: 16px;
-  background: linear-gradient(
-    120deg,
-    rgba(141, 89, 255, 0.65) 0%,
-    rgba(124, 83, 211, 0.48) 30%,
-    rgba(85, 108, 255, 0.5) 60%,
-    rgba(122, 86, 236, 0.56) 100%
-  );
-  background-size: 220% 220%;
-  animation: sceneforge-magical-border 16s ease-in-out infinite;
-  filter: blur(0.2px);
-}
-
-.sceneforge-generator-dialog > * {
-  position: relative;
-  z-index: 1;
+  border: 1px solid rgba(124, 89, 214, 0.48);
+  animation: sceneforge-magical-border 14s ease-in-out infinite;
 }
 
 .sceneforge-generator-dialog .window-header {
@@ -253,13 +229,25 @@
 
 @keyframes sceneforge-magical-border {
   0% {
-    background-position: 0% 50%;
+    border-color: rgba(145, 98, 246, 0.54);
+    box-shadow:
+      0 20px 45px rgba(3, 8, 22, 0.65),
+      0 0 0 1px rgba(137, 90, 232, 0.18),
+      0 0 16px rgba(126, 78, 222, 0.24);
   }
   50% {
-    background-position: 100% 50%;
+    border-color: rgba(96, 125, 244, 0.58);
+    box-shadow:
+      0 20px 45px rgba(3, 8, 22, 0.65),
+      0 0 0 1px rgba(87, 116, 232, 0.2),
+      0 0 18px rgba(88, 122, 239, 0.26);
   }
   100% {
-    background-position: 0% 50%;
+    border-color: rgba(162, 114, 255, 0.52);
+    box-shadow:
+      0 20px 45px rgba(3, 8, 22, 0.65),
+      0 0 0 1px rgba(151, 105, 246, 0.18),
+      0 0 16px rgba(143, 98, 236, 0.24);
   }
 }
 
