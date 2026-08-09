@@ -560,13 +560,6 @@ const AI_PLANNER_TERRAIN_FEATURES = [
 
 const AI_PLANNER_LIGHTING_MOODS = ["bright", "dim", "dark", "magical", "torchlit"];
 
-/**
- * Settings keys for optional premium-style asset packs.
- * Base assets are always included and do not need a setting.
- */
-const SETTING_PREMIUM_TAVERN_PACK = "enablePremiumTavernPack";
-const SETTING_DARK_DUNGEON_PACK = "enableDarkDungeonPack";
-const SETTING_RUNE_RUINS_PACK = "enableRuneRuinsPack";
 const SETTING_AI_IMAGE_PROVIDER = "aiImageProvider";
 const SETTING_OPENAI_API_KEY = "openAiApiKey";
 const SETTING_BFL_API_KEY = "bflApiKey";
@@ -988,33 +981,6 @@ async function enforceProductionSettingsDefaults() {
  * Location in Foundry: Game Settings -> Configure Settings -> Module Settings.
  */
 function registerAssetPackSettings() {
-  game.settings.register(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK, {
-    name: "Premium Tavern Pack",
-    hint: "Enable additive tavern assets from /assets/premium/tavern/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
-  game.settings.register(MODULE_ID, SETTING_DARK_DUNGEON_PACK, {
-    name: "Dark Dungeon Pack",
-    hint: "Enable additive dungeon assets from /assets/premium/dark-dungeon/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
-  game.settings.register(MODULE_ID, SETTING_RUNE_RUINS_PACK, {
-    name: "Rune Ruins Pack",
-    hint: "Enable additive forest ruins assets from /assets/premium/rune-ruins/...",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-
   game.settings.register(MODULE_ID, SETTING_AI_IMAGE_PROVIDER, {
     name: "AI Image Provider",
     hint: "SceneForge Cloud provider (BFL via backend).",
@@ -1156,54 +1122,15 @@ function registerAssetPackSettings() {
   });
 }
 
-/**
- * Merge base registry + enabled pack registries into one active registry.
- *
- * Beginner note:
- * To add a new future subscriber pack:
- *  1) create a new <packName>Registry object with theme arrays
- *  2) register a module setting toggle
- *  3) include the registry in this function when toggle is enabled
- */
-function getActiveAssetRegistry(forcedEnabledPackIds = null) {
-  const merged = cloneRegistryWithPackMeta(baseRegistry, "base");
-
-  if (isAssetPackEnabled("premium-tavern", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(premiumTavernRegistry, "premium-tavern"));
-  }
-  if (isAssetPackEnabled("dark-dungeon", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(darkDungeonRegistry, "dark-dungeon"));
-  }
-  if (isAssetPackEnabled("rune-ruins", forcedEnabledPackIds)) {
-    mergeRegistryInto(merged, cloneRegistryWithPackMeta(runeRuinsRegistry, "rune-ruins"));
-  }
-
-  return merged;
-}
-
-/**
- * Supports either explicit pack IDs (preset import) or world settings toggles.
- */
-function isAssetPackEnabled(packId, forcedEnabledPackIds) {
-  if (Array.isArray(forcedEnabledPackIds)) {
-    return forcedEnabledPackIds.includes(packId);
-  }
-
-  if (packId === "premium-tavern") return game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK);
-  if (packId === "dark-dungeon") return game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK);
-  if (packId === "rune-ruins") return game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK);
-  return false;
+function getActiveAssetRegistry(_forcedEnabledPackIds = null) {
+  return cloneRegistryWithPackMeta(baseRegistry, "base");
 }
 
 /**
  * Returns active non-base pack IDs, useful for debugging and scene flags.
  */
 function getEnabledAssetPackIds() {
-  const packIds = [];
-  if (game.settings.get(MODULE_ID, SETTING_PREMIUM_TAVERN_PACK)) packIds.push("premium-tavern");
-  if (game.settings.get(MODULE_ID, SETTING_DARK_DUNGEON_PACK)) packIds.push("dark-dungeon");
-  if (game.settings.get(MODULE_ID, SETTING_RUNE_RUINS_PACK)) packIds.push("rune-ruins");
-  return packIds;
+  return [];
 }
 
 function getAiImageProvider() {
@@ -1942,7 +1869,9 @@ Hooks.on("renderSettingsConfig", (_app, html) => {
   if (!rootElement) return;
   if (rootElement.querySelector(".sceneforge-auth-actions")) return;
 
-  const anchorInput = rootElement.querySelector(`input[name="${MODULE_ID}.${SETTING_RUNE_RUINS_PACK}"]`);
+  const anchorInput = rootElement.querySelector(
+    `[name="${MODULE_ID}.${SETTING_AUTO_ACTIVATE_GENERATED_SCENE}"],[name^="${MODULE_ID}."]`
+  );
   const anchorGroup = anchorInput?.closest(".form-group");
   if (!anchorGroup) return;
 
