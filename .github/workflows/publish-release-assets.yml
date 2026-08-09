@@ -41,7 +41,7 @@ jobs:
       - name: Create or update GitHub release assets
         uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
+          tag: ${{ steps.release_meta.outputs.tag }}
           name: SceneForgeAI ${{ steps.release_meta.outputs.tag }}
           artifacts: "module.json,sceneforge-ai.zip"
           allowUpdates: true
