@@ -2790,7 +2790,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       height: heightPx,
       padding: 0.1,
       grid: {
-        type: CONST.GRID_TYPES.SQUARE,
+        type: CONST.GRID_TYPES.GRIDLESS,
         size: gridPixelSize,
         distance: metersPerGrid,
         units: "m"
@@ -2858,7 +2858,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
           width: resolvedImageWidth,
           height: resolvedImageHeight,
           grid: {
-            type: CONST.GRID_TYPES.SQUARE,
+            type: CONST.GRID_TYPES.GRIDLESS,
             size: resolvedGridPixelSize,
             distance: metersPerGrid,
             units: "m"
@@ -4688,7 +4688,7 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
     height: heightPx,
     padding: 0.1,
     grid: {
-      type: CONST.GRID_TYPES.SQUARE,
+      type: CONST.GRID_TYPES.GRIDLESS,
       size: gridPixelSize,
       distance: metersPerGrid,
       units: "m"
@@ -4834,7 +4834,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     width: widthPx,
     height: heightPx,
     grid: {
-      type: CONST.GRID_TYPES.SQUARE,
+      type: CONST.GRID_TYPES.GRIDLESS,
       size: gridPixelSize,
       distance: metersPerGrid,
       units: "m"
