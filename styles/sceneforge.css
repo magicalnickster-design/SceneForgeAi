@@ -227,6 +227,73 @@
     0 0 26px rgba(84, 124, 255, 0.25);
 }
 
+.sceneforge-generator-dialog .sceneforge-edit-map-form {
+  display: grid;
+  gap: 12px;
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-preview h3,
+.sceneforge-generator-dialog .sceneforge-edit-map-input label {
+  display: block;
+  margin: 0 0 7px;
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: #f2f5ff;
+  letter-spacing: 0.015em;
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-preview img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid rgba(115, 117, 168, 0.45);
+  background: rgba(8, 12, 30, 0.78);
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-input textarea {
+  min-height: 170px;
+  resize: vertical;
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-submit {
+  height: 44px;
+  border-radius: 10px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  border: 1px solid rgba(154, 110, 255, 0.8);
+  color: #f5f0ff;
+  background:
+    radial-gradient(130% 100% at 15% 0%, rgba(175, 120, 255, 0.28) 0%, rgba(89, 53, 171, 0) 60%),
+    linear-gradient(180deg, rgba(106, 58, 204, 0.93) 0%, rgba(73, 42, 150, 0.95) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(244, 232, 255, 0.2),
+    0 0 14px rgba(122, 70, 218, 0.35),
+    0 0 24px rgba(67, 108, 255, 0.22);
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-submit:hover {
+  border-color: rgba(188, 152, 255, 0.95);
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-submit:disabled,
+.sceneforge-generator-dialog .sceneforge-edit-map-submit.disabled {
+  opacity: 0.75;
+  cursor: wait;
+}
+
+.sceneforge-generator-dialog .sceneforge-edit-map-status {
+  margin: 0;
+  color: rgba(184, 191, 212, 0.86);
+  font-size: 0.9rem;
+}
+
 @keyframes sceneforge-magical-border {
   0% {
     border-color: rgba(145, 98, 246, 0.54);

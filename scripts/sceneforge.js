@@ -10,6 +10,7 @@ const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
+const FLAG_ORIGINAL_PROMPT = "originalPrompt";
 const DEBUG = false;
 const GLOBAL_IMAGE_LIBRARY_ONLY = true;
 const TILE_FALLBACK_MODE = "skip-missing";
@@ -388,11 +389,34 @@ async function loadImageAsBlobOrFile(backgroundPath, options = {}) {
   };
 }
 
+async function blobToDataUrl(blob) {
+  if (!(blob instanceof Blob)) {
+    throw new Error("Invalid reference image blob.");
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("Failed to convert reference image to data URL."));
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function persistEditedSceneBackground(imageData, options = {}) {
   return persistSceneBackgroundPath(imageData, {
     seed: options.seed ?? "edit",
     provider: options.provider ?? "edit"
   });
+}
+
+function getStoredSceneOriginalPrompt(scene) {
+  return String(scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT) ?? "").trim();
+}
+
+async function setStoredSceneOriginalPrompt(scene, prompt) {
+  if (!scene?.setFlag) return;
+  const normalizedPrompt = String(prompt ?? "").trim();
+  if (!normalizedPrompt) return;
+  await scene.setFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT, normalizedPrompt);
 }
 
 async function getImagePixelDimensions(imagePath) {
@@ -802,6 +826,25 @@ function buildTextToImageRequestPayload(compiledPrompt, options = {}) {
     seed: options.seed ?? null
   };
   const payloadBuilder = getGenerationTransactionApi()?.buildTextToImagePayload;
+  if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
+  return requestedPayload;
+}
+
+function buildImageEditRequestPayload(editPrompt, options = {}) {
+  const normalizedPrompt = String(editPrompt ?? "").trim();
+  const resolvedWidth = Math.max(256, Number(options.width ?? 0) || 1536);
+  const resolvedHeight = Math.max(256, Number(options.height ?? 0) || 1024);
+  const orientation = resolvedWidth >= resolvedHeight ? "landscape" : "portrait";
+  const requestedPayload = {
+    prompt: normalizedPrompt,
+    size: `${resolvedWidth}x${resolvedHeight}`,
+    orientation,
+    width: resolvedWidth,
+    height: resolvedHeight,
+    seed: options.seed ?? null,
+    input_image: String(options.referenceImageDataUrl ?? "").trim()
+  };
+  const payloadBuilder = getGenerationTransactionApi()?.buildImageEditPayload;
   if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
   return requestedPayload;
 }
@@ -1736,10 +1779,10 @@ Hooks.on("renderSceneDirectory", (app, html) => {
  */
 function registerSceneDirectoryEntryContextOptions(entryOptions) {
   if (!Array.isArray(entryOptions)) return;
-  if (entryOptions.some((option) => option?.name === "Edit Image (SceneForge AI)")) return;
+  if (entryOptions.some((option) => option?.name === "Edit Map (SceneForge AI)")) return;
 
   entryOptions.push({
-    name: "Edit Image (SceneForge AI)",
+    name: "Edit Map (SceneForge AI)",
     icon: '<i class="fas fa-image"></i>',
     condition: () => game.user?.isGM === true,
     callback: async (li) => {
@@ -2577,6 +2620,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (resolvedGenerationData.imageGeneration) {
       await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, resolvedGenerationData.imageGeneration);
     }
+    await setStoredSceneOriginalPrompt(scene, resolvedGenerationData?.prompt ?? "");
 
     if (persistedBackgroundPath) {
       if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
@@ -2759,37 +2803,6 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   });
 }
 
-function buildSceneImageEditPrompt(userInstructions, preserveOptions, strength) {
-  const selectedPreserve = [];
-  if (preserveOptions?.artStyle) selectedPreserve.push("Art style");
-  if (preserveOptions?.lighting) selectedPreserve.push("Lighting");
-  if (preserveOptions?.terrain) selectedPreserve.push("Terrain");
-  if (preserveOptions?.structures) selectedPreserve.push("Structures");
-  const preserveLine = selectedPreserve.length > 0 ? selectedPreserve.join(", ") : "None selected";
-
-  return [
-    "You are editing an existing top-down fantasy battle map. Make only the requested changes. Preserve the original camera angle, art style, lighting, terrain, composition, and map usability unless the user specifically asks otherwise.",
-    "",
-    `USER EDIT:\n${String(userInstructions ?? "").trim()}`,
-    "",
-    `PRESERVE:\n${preserveLine}`,
-    "",
-    `CHANGE STRENGTH:\nApply approximately ${Math.max(0, Math.min(100, Number(strength) || 0))}% change. Lower strength means minimal edits and maximum consistency.`,
-    "",
-    "HARD CONSTRAINTS:",
-    "- Keep TRUE TOP DOWN battle map perspective.",
-    "- Keep 90 degree orthographic camera.",
-    "- Keep gridless VTT map format.",
-    "- No characters.",
-    "- No text.",
-    "- No labels.",
-    "- No UI elements.",
-    "- No isometric angle.",
-    "- No cinematic perspective.",
-    "- Return only the edited map image."
-  ].join("\n");
-}
-
 async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) {
   const provider = "openai";
   const costEstimate = {
@@ -2875,6 +2888,39 @@ async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) 
   }
 }
 
+async function editSubscriptionMapImage(referenceImagePath, editPrompt, options = {}) {
+  try {
+    const referenceImage = await loadImageAsBlobOrFile(referenceImagePath, {
+      filenamePrefix: "sceneforge-edit-reference"
+    });
+    const referenceImageDataUrl = await blobToDataUrl(referenceImage.blob);
+    if (!referenceImageDataUrl || !referenceImageDataUrl.startsWith("data:image/")) {
+      return {
+        provider: "subscription",
+        imageStatus: "failed",
+        imagePath: null,
+        errorMessage: "SceneForge AI: Could not prepare reference image for editing."
+      };
+    }
+    return generateSubscriptionMapImage(editPrompt, {
+      width: Number(options.width ?? 0) || undefined,
+      height: Number(options.height ?? 0) || undefined,
+      referenceImageDataUrl,
+      requestType: "image-edit"
+    });
+  } catch (error) {
+    logImagePipelineError("subscription edit reference image conversion failed", {
+      referenceImagePath
+    }, error);
+    return {
+      provider: "subscription",
+      imageStatus: "failed",
+      imagePath: null,
+      errorMessage: "SceneForge AI: Could not load the current map image for editing."
+    };
+  }
+}
+
 async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   const provider = getAiImageProvider();
   if (provider === "none") {
@@ -2899,6 +2945,9 @@ async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   if (provider === "openai") {
     return editOpenAiMapImage(referenceImagePath, editPrompt, options);
   }
+  if (provider === "black-forest-labs") {
+    return editSubscriptionMapImage(referenceImagePath, editPrompt, options);
+  }
   return {
     provider,
     imageStatus: "failed",
@@ -2911,24 +2960,24 @@ async function handleSceneImageEdit(scene, editConfig) {
   const originalBackgroundPath = getSceneBackgroundPath(scene);
   if (!originalBackgroundPath) {
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
-    return;
+    return false;
   }
   if (getAiImageProvider() === "none") {
     ui.notifications.error("SceneForge AI: No AI image provider selected.");
-    return;
+    return false;
   }
-  const editPrompt = buildSceneImageEditPrompt(
-    editConfig.instructions,
-    editConfig.preserveOptions,
-    editConfig.strength
-  );
+  const editPrompt = String(editConfig?.prompt ?? "").trim();
+  if (!editPrompt) {
+    ui.notifications.warn("SceneForge AI: Please enter map edit instructions.");
+    return false;
+  }
   const result = await editAiMapImage(originalBackgroundPath, editPrompt, {
-    strength: editConfig.strength,
-    preserveOptions: editConfig.preserveOptions
+    width: Number(scene?.width ?? 0) || undefined,
+    height: Number(scene?.height ?? 0) || undefined
   });
   if (!result?.imagePath || (result.imageStatus !== "complete" && result.imageStatus !== "mock-edited")) {
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
-    return;
+    return false;
   }
 
   try {
@@ -2947,13 +2996,42 @@ async function handleSceneImageEdit(scene, editConfig) {
       await applyBackgroundToScene(scene, originalBackgroundPath);
       throw new Error("Scene background verification failed after edit.");
     }
+    await setStoredSceneOriginalPrompt(scene, editPrompt);
+    const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
+    if (generationData && typeof generationData === "object") {
+      await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
+        ...generationData,
+        prompt: editPrompt,
+        imageGeneration: {
+          ...(generationData?.imageGeneration ?? {}),
+          ...(result?.generationMetadata ?? {}),
+          provider: result?.provider ?? generationData?.imageGeneration?.provider ?? "subscription",
+          compiledPrompt: editPrompt,
+          imageStatus: result?.imageStatus ?? "complete",
+          imagePath: persistedPath
+        },
+        lastGeneratedAt: Date.now()
+      });
+    }
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, {
+      ...(result?.generationMetadata ?? {}),
+      provider: result?.provider ?? "subscription",
+      compiledPrompt: editPrompt,
+      imageStatus: result?.imageStatus ?? "complete",
+      imagePath: persistedPath
+    });
+    if (canvas?.scene?.id === scene?.id && typeof canvas.draw === "function") {
+      await canvas.draw();
+    }
     ui.notifications.info("SceneForge AI: Edited map applied successfully.");
+    return true;
   } catch (error) {
     logImagePipelineError("scene image edit apply failed", {
       sceneId: scene?.id ?? null,
       sceneName: scene?.name ?? null
     }, error);
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    return false;
   }
 }
 
@@ -2963,69 +3041,68 @@ async function openSceneImageEditDialog(scene) {
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
     return;
   }
+  const storedPrompt = getStoredSceneOriginalPrompt(scene);
   const content = `
-<form class="sceneforge-edit-form">
-  <div class="form-group">
-    <label>Current Map</label>
-    <div style="margin-top:6px;">
-      <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" style="max-width:100%; max-height:220px; border-radius:6px; object-fit:contain;" />
-    </div>
+<form class="sceneforge-edit-map-form">
+  <div class="sceneforge-edit-map-preview">
+    <h3>Current Map</h3>
+    <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" />
   </div>
-  <div class="form-group">
-    <label for="sf-edit-instructions">Edit Instructions</label>
-    <textarea id="sf-edit-instructions" name="instructions" rows="5" placeholder="Example: Move the ship away from the pathway and dock it along the right side. Keep the beach, road, dock, and ocean unchanged." required></textarea>
+  <div class="sceneforge-edit-map-input">
+    <label for="sf-edit-map-prompt">Edit Your Map</label>
+    <textarea
+      id="sf-edit-map-prompt"
+      name="prompt"
+      rows="8"
+      placeholder="Describe what you want to change about this map..."
+    >${foundry.utils.escapeHTML(storedPrompt)}</textarea>
   </div>
-  <fieldset class="form-group">
-    <legend>Preserve</legend>
-    <label><input type="checkbox" name="preserveArtStyle" checked /> Art style</label><br/>
-    <label><input type="checkbox" name="preserveLighting" checked /> Lighting</label><br/>
-    <label><input type="checkbox" name="preserveTerrain" checked /> Terrain</label><br/>
-    <label><input type="checkbox" name="preserveStructures" checked /> Structures</label>
-  </fieldset>
-  <div class="form-group">
-    <label for="sf-edit-strength">Change Strength: <span class="sf-edit-strength-value">30</span>%</label>
-    <input id="sf-edit-strength" type="range" name="strength" min="0" max="100" value="30" />
+  <div class="sceneforge-edit-map-actions">
+    <button type="submit" class="sceneforge-edit-map-submit">
+      <i class="fas fa-wand-magic-sparkles"></i> Edit Map
+    </button>
+    <p class="sceneforge-edit-map-status" aria-live="polite"></p>
   </div>
 </form>
   `;
 
   const dialog = new Dialog({
-    title: "SceneForge AI - Edit Image",
+    title: "SceneForge AI - Edit Map",
     content,
-    buttons: {
-      generate: {
-        icon: '<i class="fas fa-wand-magic-sparkles"></i>',
-        label: "Generate Edited Image",
-        callback: async (dialogHtml) => {
-          const form = dialogHtml.find(".sceneforge-edit-form");
-          const instructions = String(form.find('[name="instructions"]').val() ?? "").trim();
-          if (!instructions) {
-            ui.notifications.warn("SceneForge AI: Please enter edit instructions.");
-            return;
-          }
-          await handleSceneImageEdit(scene, {
-            instructions,
-            preserveOptions: {
-              artStyle: form.find('[name="preserveArtStyle"]').is(":checked"),
-              lighting: form.find('[name="preserveLighting"]').is(":checked"),
-              terrain: form.find('[name="preserveTerrain"]').is(":checked"),
-              structures: form.find('[name="preserveStructures"]').is(":checked")
-            },
-            strength: Number(form.find('[name="strength"]').val() ?? 30)
-          });
-        }
-      },
-      cancel: {
-        icon: '<i class="fas fa-times"></i>',
-        label: "Cancel"
-      }
-    },
-    default: "generate",
+    classes: ["sceneforge-generator-dialog", "sceneforge-edit-map-dialog"],
+    buttons: {},
     render: (dialogHtml) => {
-      const slider = dialogHtml.find('[name="strength"]');
-      const strengthValue = dialogHtml.find(".sf-edit-strength-value");
-      slider.on("input change", () => {
-        strengthValue.text(String(slider.val() ?? 30));
+      const rootElement = getHtmlElement(dialogHtml);
+      const formElement = rootElement?.querySelector(".sceneforge-edit-map-form");
+      const promptField = rootElement?.querySelector('textarea[name="prompt"]');
+      const submitButton = rootElement?.querySelector(".sceneforge-edit-map-submit");
+      const statusField = rootElement?.querySelector(".sceneforge-edit-map-status");
+      if (!formElement || !promptField || !submitButton) return;
+
+      let isSubmitting = false;
+      formElement.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (isSubmitting) return;
+        const prompt = String(promptField.value ?? "").trim();
+        if (!prompt) {
+          ui.notifications.warn("SceneForge AI: Please enter map edit instructions.");
+          return;
+        }
+        isSubmitting = true;
+        submitButton.disabled = true;
+        submitButton.classList.add("disabled");
+        submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Editing...';
+        if (statusField) statusField.textContent = "Applying map edits...";
+        const success = await handleSceneImageEdit(scene, { prompt });
+        if (success) {
+          dialog.close();
+          return;
+        }
+        isSubmitting = false;
+        submitButton.disabled = false;
+        submitButton.classList.remove("disabled");
+        submitButton.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Edit Map';
+        if (statusField) statusField.textContent = "";
       });
     }
   });
@@ -3154,8 +3231,12 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     };
   }
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
+  const requestType = String(options.requestType ?? "text-to-image").trim().toLowerCase();
+  const isImageEditRequest = requestType === "image-edit";
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
-  const requestPayload = buildTextToImageRequestPayload(compiledPrompt, options);
+  const requestPayload = isImageEditRequest
+    ? buildImageEditRequestPayload(compiledPrompt, options)
+    : buildTextToImageRequestPayload(compiledPrompt, options);
   logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
 
   try {
@@ -3262,7 +3343,9 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         imageStatus: "failed",
         imagePath: null,
         costEstimate,
-        errorMessage: "Subscription backend returned no map image."
+        errorMessage: isImageEditRequest
+          ? "Subscription backend returned no edited map image."
+          : "Subscription backend returned no map image."
       };
     }
 
@@ -4356,6 +4439,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
   if (generationData.imageGeneration) {
     await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, generationData.imageGeneration);
   }
+  await setStoredSceneOriginalPrompt(scene, prompt);
 }
 
 /**
