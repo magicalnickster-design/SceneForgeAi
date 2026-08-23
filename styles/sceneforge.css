@@ -232,19 +232,17 @@
   gap: 12px;
 }
 
-.sceneforge-generator-dialog .sceneforge-edit-map-preview h3,
-.sceneforge-generator-dialog .sceneforge-edit-map-input label {
-  display: block;
-  margin: 0 0 7px;
-  font-size: 0.96rem;
-  font-weight: 700;
-  color: #f2f5ff;
-  letter-spacing: 0.015em;
+.sceneforge-edit-map-dialog {
+  min-width: 920px;
+}
+
+.sceneforge-generator-dialog.sceneforge-edit-map-dialog .window-content {
+  overflow: hidden;
 }
 
 .sceneforge-generator-dialog .sceneforge-edit-map-preview img {
   width: 100%;
-  max-height: 220px;
+  max-height: 360px;
   object-fit: contain;
   border-radius: 10px;
   border: 1px solid rgba(115, 117, 168, 0.45);
@@ -252,7 +250,7 @@
 }
 
 .sceneforge-generator-dialog .sceneforge-edit-map-input textarea {
-  min-height: 170px;
+  min-height: 230px;
   resize: vertical;
 }
 

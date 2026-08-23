@@ -3043,17 +3043,17 @@ async function openSceneImageEditDialog(scene) {
   }
   const storedPrompt = getStoredSceneOriginalPrompt(scene);
   const content = `
-<form class="sceneforge-edit-map-form">
-  <div class="sceneforge-edit-map-preview">
-    <h3>Current Map</h3>
+<form class="sceneforge-form sceneforge-generate-form sceneforge-edit-map-form">
+  <div class="sceneforge-field sceneforge-edit-map-preview">
+    <label class="sceneforge-field-label">Current Map</label>
     <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" />
   </div>
-  <div class="sceneforge-edit-map-input">
-    <label for="sf-edit-map-prompt">Edit Your Map</label>
+  <div class="sceneforge-field sceneforge-field-prompt sceneforge-edit-map-input">
+    <label class="sceneforge-field-label" for="sf-edit-map-prompt">Edit Your Map</label>
     <textarea
       id="sf-edit-map-prompt"
       name="prompt"
-      rows="8"
+      rows="10"
       placeholder="Describe what you want to change about this map..."
     >${foundry.utils.escapeHTML(storedPrompt)}</textarea>
   </div>
@@ -3070,8 +3070,15 @@ async function openSceneImageEditDialog(scene) {
     title: "SceneForge AI - Edit Map",
     content,
     classes: ["sceneforge-generator-dialog", "sceneforge-edit-map-dialog"],
+    width: 960,
+    height: 920,
+    resizable: true,
     buttons: {},
     render: (dialogHtml) => {
+      const dialogWindow = dialogHtml?.closest?.(".app.window-app");
+      if (dialogWindow?.length) {
+        dialogWindow.addClass("sceneforge-generator-dialog sceneforge-edit-map-dialog");
+      }
       const rootElement = getHtmlElement(dialogHtml);
       const formElement = rootElement?.querySelector(".sceneforge-edit-map-form");
       const promptField = rootElement?.querySelector('textarea[name="prompt"]');
