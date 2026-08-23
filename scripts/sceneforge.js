@@ -658,8 +658,16 @@ const TAVERN_INTERIOR_HARD_REQUIREMENTS = [
   "INCLUDE A DISTINCT BAR OR SERVING COUNTER AREA APPROPRIATE FOR A FANTASY TAVERN",
   "INCLUDE A SEPARATE SERVICE OR STORAGE AREA FOR TAVERN OPERATIONS WITHOUT MIXING BEDS INTO BULK STORAGE"
 ];
+const REFERENCE_LAYOUT_VARIATION_PROFILES = [
+  "CREATE A NEW EXTERIOR FOOTPRINT AND ROOM PARTITION SCHEME; DO NOT REUSE THE SAME BUILDING OUTLINE AS THE REFERENCE",
+  "REARRANGE THE MAIN ROOM, BAR LOCATION, AND PRIVATE ROOMS INTO A DISTINCTLY DIFFERENT FLOORPLAN THAN THE REFERENCE",
+  "KEEP THE FUNCTIONAL LOGIC BUT CHANGE WALL SHAPES, DOOR LOCATIONS, AND FURNITURE CLUSTERS SO THE LAYOUT IS CLEARLY NEW",
+  "PRESERVE QUALITY STANDARDS BUT USE A DIFFERENT INTERIOR CIRCULATION PATH, DIFFERENT ROOM PROPORTIONS, AND A NEW ENTRANCE ALIGNMENT"
+];
 const REFERENCE_GUIDANCE_SUFFIX = [
   "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition.",
+  "Use it for quality and structural principles only, not for exact geometry.",
+  "Do not copy or closely mirror the reference footprint, wall layout, door positions, or furniture arrangement.",
   "Create a new original environment based on the user's requested description.",
   "Do not recreate or copy the exact reference layout.",
   ...INTERIOR_LAYOUT_HARD_REQUIREMENTS
@@ -1378,6 +1386,23 @@ function resolveGenerationReferenceContext(prompt) {
     backendManaged,
     referenceImageUrl: backendManaged ? "" : buildReferenceImageUrl(detection.referenceImagePath)
   };
+}
+
+function buildReferenceVariationGuidance(referenceContext, options = {}) {
+  if (!referenceContext) return "";
+  const sourcePrompt = String(options.sourcePrompt ?? "").trim().toLowerCase();
+  const seed = String(options.seed ?? "").trim().toLowerCase();
+  const basis = `${referenceContext.categoryId}|${sourcePrompt}|${seed}`;
+  let hash = 0;
+  for (let idx = 0; idx < basis.length; idx += 1) {
+    hash = ((hash << 5) - hash + basis.charCodeAt(idx)) | 0;
+  }
+  const profileIndex = Math.abs(hash) % REFERENCE_LAYOUT_VARIATION_PROFILES.length;
+  const selectedProfile = REFERENCE_LAYOUT_VARIATION_PROFILES[profileIndex] ?? REFERENCE_LAYOUT_VARIATION_PROFILES[0];
+  return [
+    "REFERENCE DIVERSITY REQUIREMENT: OUTPUT MUST BE VISIBLY DISTINCT FROM THE REFERENCE IMAGE.",
+    selectedProfile
+  ].join("\n");
 }
 
 function shouldAutoActivateGeneratedScene() {
@@ -3041,6 +3066,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   reportProgress("Requesting AI map image...", 56);
   const imageResult = await generateAiMapImage(compiledPrompt, {
     seed: generationData.seed,
+    sourcePrompt: generationData?.prompt ?? "",
     imageSize: generationData.imageSize ?? getRequestedImageSize(generationData.sceneSizeKey, generationData.imageOrientation),
     imageOrientation: generationData.imageOrientation ?? "landscape",
     referenceContext
@@ -3622,8 +3648,18 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       referenceContext = null;
     }
   }
+  const referenceVariationGuidance = referenceContext
+    ? buildReferenceVariationGuidance(referenceContext, {
+      sourcePrompt: options?.sourcePrompt ?? "",
+      seed: options?.seed ?? ""
+    })
+    : "";
   const effectivePrompt = referenceContext
-    ? `${String(compiledPrompt ?? "").trim()}\n${String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim()}`
+    ? [
+      String(compiledPrompt ?? "").trim(),
+      String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim(),
+      String(referenceVariationGuidance ?? "").trim()
+    ].filter(Boolean).join("\n")
     : String(compiledPrompt ?? "").trim();
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
   let requestPayload = isImageEditRequest
