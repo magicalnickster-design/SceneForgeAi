@@ -3077,12 +3077,18 @@ async function openSceneImageEditDialog(scene) {
 </form>
   `;
 
+  const viewportHeight = Number(window?.innerHeight ?? 0);
+  const preferredHeight = 1080;
+  const minimumHeight = 760;
+  const computedHeight = viewportHeight > 0
+    ? Math.max(minimumHeight, Math.min(preferredHeight, viewportHeight - 80))
+    : preferredHeight;
   const dialog = new Dialog({
     title: "SceneForge AI - Edit Map",
     content,
     classes: ["sceneforge-generator-dialog", "sceneforge-edit-map-dialog"],
     width: 960,
-    height: 920,
+    height: computedHeight,
     resizable: true,
     buttons: {},
     render: (dialogHtml) => {

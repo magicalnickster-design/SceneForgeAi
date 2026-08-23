@@ -237,7 +237,9 @@
 }
 
 .sceneforge-generator-dialog.sceneforge-edit-map-dialog .window-content {
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: calc(100vh - 110px);
 }
 
 .sceneforge-generator-dialog .sceneforge-edit-map-preview img {
