@@ -642,7 +642,21 @@ const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_AUTH_API_BASE_URL = "https://gambitsforge.online";
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
-const REFERENCE_GUIDANCE_SUFFIX = "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition. Create a new original environment based on the user's requested description. Do not recreate or copy the exact reference layout.";
+const INTERIOR_LAYOUT_HARD_REQUIREMENTS = [
+  "ALL INTERIOR BUILDINGS MUST USE PRE-MODERN FANTASY FURNISHINGS ONLY",
+  "NO MODERN APPLIANCES, NO MODERN KITCHEN EQUIPMENT, NO REFRIGERATORS, NO MODERN STOVES, NO MICROWAVES",
+  "NO MODERN BATHROOMS, NO TOILETS, NO SHOWERS, NO BATHTUB FIXTURES, NO SINK-VANITY BATHROOM SETUPS",
+  "BEDROOMS MUST BE SEPARATE SLEEPING SPACES; DO NOT PLACE BEDS IN STORAGE ROOMS",
+  "DO NOT PLACE BEDS IN THE SAME ROOM AS BARRELS, CRATES, OR BULK STORAGE PILES",
+  "EACH BUILDING MUST HAVE EXACTLY ONE EXTERIOR FRONT DOOR ENTRANCE",
+  "DO NOT ADD MULTIPLE EXTERIOR ENTRANCES TO THE SAME BUILDING"
+];
+const REFERENCE_GUIDANCE_SUFFIX = [
+  "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition.",
+  "Create a new original environment based on the user's requested description.",
+  "Do not recreate or copy the exact reference layout.",
+  ...INTERIOR_LAYOUT_HARD_REQUIREMENTS
+].join(" ");
 const DEFAULT_REFERENCE_LIBRARY_CONFIG = {
   version: 1,
   categories: [
@@ -5708,6 +5722,9 @@ function compileInkarnatePrompt(prompt, options = {}) {
       "WALLS MUST ALIGN TO ENCLOSING ROOM SHAPES; NO FLOATING WALLS OR DEAD-END PASSAGES WITHOUT PURPOSE",
       "DOOR PLACEMENT MUST CONNECT SPACES LOGICALLY AND SUPPORT CONTINUOUS NAVIGATION ACROSS THE MAP"
     ];
+  const interiorSpecificLines = buildingViewMode === "roofs-no-interior"
+    ? []
+    : INTERIOR_LAYOUT_HARD_REQUIREMENTS;
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
@@ -5723,6 +5740,7 @@ function compileInkarnatePrompt(prompt, options = {}) {
     "IF A STRUCTURE APPEARS, FORCE IT INTO FLAT TOP-DOWN ROOF OR FLOOR FOOTPRINT",
     buildingViewLine,
     ...spatialIntegrityLines,
+    ...interiorSpecificLines,
     "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
     "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
     "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",
