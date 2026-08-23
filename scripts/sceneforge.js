@@ -2999,7 +2999,7 @@ async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   if (provider === "openai") {
     return editOpenAiMapImage(referenceImagePath, editPrompt, options);
   }
-  if (provider === "black-forest-labs") {
+  if (provider === "subscription" || provider === "black-forest-labs") {
     return editSubscriptionMapImage(referenceImagePath, editPrompt, options);
   }
   return {
