@@ -401,6 +401,50 @@ async function blobToDataUrl(blob) {
   });
 }
 
+async function imageBlobToOptimizedDataUrl(blob, options = {}) {
+  const maxBytes = Math.max(256 * 1024, Number(options.maxBytes ?? 1_300_000));
+  const maxDimension = Math.max(512, Number(options.maxDimension ?? 1280));
+  const fallbackDataUrl = await blobToDataUrl(blob);
+  if (!(blob instanceof Blob) || blob.size <= maxBytes) return fallbackDataUrl;
+  if (typeof document === "undefined" || typeof URL === "undefined") return fallbackDataUrl;
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Failed to decode reference image."));
+      img.src = objectUrl;
+    });
+    const sourceWidth = Number(image.naturalWidth || image.width || 0);
+    const sourceHeight = Number(image.naturalHeight || image.height || 0);
+    if (sourceWidth <= 0 || sourceHeight <= 0) return fallbackDataUrl;
+
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return fallbackDataUrl;
+    context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+    const qualitySteps = [0.9, 0.82, 0.74, 0.66];
+    for (const quality of qualitySteps) {
+      const candidate = canvas.toDataURL("image/jpeg", quality);
+      const bytes = Math.ceil((candidate.length - "data:image/jpeg;base64,".length) * 3 / 4);
+      if (bytes <= maxBytes) return candidate;
+    }
+    return canvas.toDataURL("image/jpeg", qualitySteps[qualitySteps.length - 1]);
+  } catch (_error) {
+    return fallbackDataUrl;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function persistEditedSceneBackground(imageData, options = {}) {
   return persistSceneBackgroundPath(imageData, {
     seed: options.seed ?? "edit",
@@ -2900,7 +2944,10 @@ async function editSubscriptionMapImage(referenceImagePath, editPrompt, options 
     const referenceImage = await loadImageAsBlobOrFile(referenceImagePath, {
       filenamePrefix: "sceneforge-edit-reference"
     });
-    const referenceImageDataUrl = await blobToDataUrl(referenceImage.blob);
+    const referenceImageDataUrl = await imageBlobToOptimizedDataUrl(referenceImage.blob, {
+      maxBytes: 1_300_000,
+      maxDimension: 1280
+    });
     if (!referenceImageDataUrl || !referenceImageDataUrl.startsWith("data:image/")) {
       return {
         provider: "subscription",
@@ -2983,7 +3030,13 @@ async function handleSceneImageEdit(scene, editConfig) {
     height: Number(scene?.height ?? 0) || undefined
   });
   if (!result?.imagePath || (result.imageStatus !== "complete" && result.imageStatus !== "mock-edited")) {
-    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    ui.notifications.error(result?.errorMessage || "SceneForge AI: Image edit failed. Original map was not changed.");
+    logImagePipelineError("scene image edit generation failed", {
+      sceneId: scene?.id ?? null,
+      provider: result?.provider ?? null,
+      imageStatus: result?.imageStatus ?? null,
+      errorMessage: result?.errorMessage ?? null
+    });
     return false;
   }
 
