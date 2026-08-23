@@ -10,6 +10,7 @@ const FLAG_GENERATION_KEY = "generationData";
 const FLAG_GENERATED_KEY = "generated";
 const FLAG_IMAGE_GENERATION_KEY = "imageGeneration";
 const FLAG_IMAGE_DUMP_ENTRY_ID = "imageDumpEntryId";
+const FLAG_ORIGINAL_PROMPT = "originalPrompt";
 const DEBUG = false;
 const GLOBAL_IMAGE_LIBRARY_ONLY = true;
 const TILE_FALLBACK_MODE = "skip-missing";
@@ -388,11 +389,85 @@ async function loadImageAsBlobOrFile(backgroundPath, options = {}) {
   };
 }
 
+async function blobToDataUrl(blob) {
+  if (!(blob instanceof Blob)) {
+    throw new Error("Invalid reference image blob.");
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("Failed to convert reference image to data URL."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function imageBlobToOptimizedDataUrl(blob, options = {}) {
+  const maxBytes = Math.max(256 * 1024, Number(options.maxBytes ?? 1_300_000));
+  const maxDimension = Math.max(512, Number(options.maxDimension ?? 1280));
+  const fallbackDataUrl = await blobToDataUrl(blob);
+  if (!(blob instanceof Blob) || blob.size <= maxBytes) return fallbackDataUrl;
+  if (typeof document === "undefined" || typeof URL === "undefined") return fallbackDataUrl;
+
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Failed to decode reference image."));
+      img.src = objectUrl;
+    });
+    const sourceWidth = Number(image.naturalWidth || image.width || 0);
+    const sourceHeight = Number(image.naturalHeight || image.height || 0);
+    if (sourceWidth <= 0 || sourceHeight <= 0) return fallbackDataUrl;
+
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+    const targetWidth = Math.max(1, Math.round(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.round(sourceHeight * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return fallbackDataUrl;
+    context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+    const qualitySteps = [0.9, 0.82, 0.74, 0.66];
+    for (const quality of qualitySteps) {
+      const candidate = canvas.toDataURL("image/jpeg", quality);
+      const bytes = Math.ceil((candidate.length - "data:image/jpeg;base64,".length) * 3 / 4);
+      if (bytes <= maxBytes) return candidate;
+    }
+    return canvas.toDataURL("image/jpeg", qualitySteps[qualitySteps.length - 1]);
+  } catch (_error) {
+    return fallbackDataUrl;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function persistEditedSceneBackground(imageData, options = {}) {
   return persistSceneBackgroundPath(imageData, {
     seed: options.seed ?? "edit",
     provider: options.provider ?? "edit"
   });
+}
+
+function getStoredSceneOriginalPrompt(scene) {
+  const fromOriginalPromptFlag = String(scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT) ?? "").trim();
+  if (fromOriginalPromptFlag) return fromOriginalPromptFlag;
+  const generationData = scene?.getFlag?.(MODULE_ID, FLAG_GENERATION_KEY);
+  const fromGenerationPrompt = String(generationData?.prompt ?? "").trim();
+  if (fromGenerationPrompt) return fromGenerationPrompt;
+  const fromCompiledPrompt = String(generationData?.imageGeneration?.compiledPrompt ?? "").trim();
+  if (fromCompiledPrompt) return fromCompiledPrompt;
+  return "";
+}
+
+async function setStoredSceneOriginalPrompt(scene, prompt) {
+  if (!scene?.setFlag) return;
+  const normalizedPrompt = String(prompt ?? "").trim();
+  if (!normalizedPrompt) return;
+  await scene.setFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT, normalizedPrompt);
 }
 
 async function getImagePixelDimensions(imagePath) {
@@ -562,10 +637,58 @@ const SETTING_AUTO_ACTIVATE_GENERATED_SCENE = "autoActivateGeneratedScene";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
+const SETTING_REFERENCE_LIBRARY_CONFIG = "referenceLibraryConfig";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_AUTH_API_BASE_URL = "https://gambitsforge.online";
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
+const INTERIOR_LAYOUT_HARD_REQUIREMENTS = [
+  "ALL INTERIOR BUILDINGS MUST USE PRE-MODERN FANTASY FURNISHINGS ONLY",
+  "NO MODERN APPLIANCES, NO MODERN KITCHEN EQUIPMENT, NO REFRIGERATORS, NO MODERN STOVES, NO MICROWAVES",
+  "NO MODERN BATHROOMS, NO TOILETS, NO SHOWERS, NO BATHTUB FIXTURES, NO SINK-VANITY BATHROOM SETUPS",
+  "BEDROOMS MUST BE SEPARATE SLEEPING SPACES; DO NOT PLACE BEDS IN STORAGE ROOMS",
+  "DO NOT PLACE BEDS IN THE SAME ROOM AS BARRELS, CRATES, OR BULK STORAGE PILES",
+  "EACH BUILDING MUST HAVE EXACTLY ONE EXTERIOR FRONT DOOR ENTRANCE",
+  "DO NOT ADD MULTIPLE EXTERIOR ENTRANCES TO THE SAME BUILDING"
+];
+const TAVERN_KEYWORD_PATTERN = /\b(tavern|inn|pub|alehouse|taproom)\b/i;
+const TAVERN_INTERIOR_HARD_REQUIREMENTS = [
+  "IF THE PROMPT DESCRIBES A TAVERN/INN/PUB/ALEHOUSE/TAPROOM INTERIOR, INCLUDE A CLEAR MAIN COMMON ROOM",
+  "THE MAIN COMMON ROOM MUST INCLUDE MULTIPLE TABLES WITH CHAIRS OR STOOLS ARRANGED FOR GUEST SEATING",
+  "INCLUDE A DISTINCT BAR OR SERVING COUNTER AREA APPROPRIATE FOR A FANTASY TAVERN",
+  "INCLUDE A SEPARATE SERVICE OR STORAGE AREA FOR TAVERN OPERATIONS WITHOUT MIXING BEDS INTO BULK STORAGE"
+];
+const REFERENCE_LAYOUT_VARIATION_PROFILES = [
+  "CREATE A NEW EXTERIOR FOOTPRINT AND ROOM PARTITION SCHEME; DO NOT REUSE THE SAME BUILDING OUTLINE AS THE REFERENCE",
+  "REARRANGE THE MAIN ROOM, BAR LOCATION, AND PRIVATE ROOMS INTO A DISTINCTLY DIFFERENT FLOORPLAN THAN THE REFERENCE",
+  "KEEP THE FUNCTIONAL LOGIC BUT CHANGE WALL SHAPES, DOOR LOCATIONS, AND FURNITURE CLUSTERS SO THE LAYOUT IS CLEARLY NEW",
+  "PRESERVE QUALITY STANDARDS BUT USE A DIFFERENT INTERIOR CIRCULATION PATH, DIFFERENT ROOM PROPORTIONS, AND A NEW ENTRANCE ALIGNMENT"
+];
+const REFERENCE_GUIDANCE_SUFFIX = [
+  "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition.",
+  "Use it for quality and structural principles only, not for exact geometry.",
+  "Do not copy or closely mirror the reference footprint, wall layout, door positions, or furniture arrangement.",
+  "Create a new original environment based on the user's requested description.",
+  "Do not recreate or copy the exact reference layout.",
+  ...INTERIOR_LAYOUT_HARD_REQUIREMENTS
+].join(" ");
+
+function isTavernLikePrompt(prompt) {
+  return TAVERN_KEYWORD_PATTERN.test(String(prompt ?? ""));
+}
+const DEFAULT_REFERENCE_LIBRARY_CONFIG = {
+  version: 1,
+  categories: [
+    {
+      id: "tavern",
+      enabled: true,
+      keywords: ["tavern", "inn", "pub", "alehouse", "taproom"],
+      backendManaged: true,
+      referenceImagePath: "/api/maps/references/tavern",
+      referenceInstruction: REFERENCE_GUIDANCE_SUFFIX
+    }
+  ]
+};
 
 function notifyThrottled(type, message, options = {}) {
   const normalizedOptions = options && typeof options === "object" ? options : {};
@@ -793,15 +916,38 @@ function extractReservationIdentifier(payload) {
 function buildTextToImageRequestPayload(compiledPrompt, options = {}) {
   const normalizedPrompt = String(compiledPrompt ?? "").trim();
   const parsedImageSize = parseImageSizeString(options.imageSize ?? "1536x1024");
+  const referenceContext = options.referenceContext ?? null;
   const requestedPayload = {
     prompt: normalizedPrompt,
     size: String(options.imageSize ?? "1536x1024"),
     orientation: String(options.imageOrientation ?? "landscape").trim().toLowerCase(),
     width: parsedImageSize?.width ?? null,
     height: parsedImageSize?.height ?? null,
-    seed: options.seed ?? null
+    seed: options.seed ?? null,
+    reference_category: referenceContext?.categoryId ?? null,
+    reference_image_url: String(referenceContext?.referenceImageUrl ?? "").trim() || null,
+    reference_instruction: String(referenceContext?.referenceInstruction ?? "").trim() || null
   };
   const payloadBuilder = getGenerationTransactionApi()?.buildTextToImagePayload;
+  if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
+  return requestedPayload;
+}
+
+function buildImageEditRequestPayload(editPrompt, options = {}) {
+  const normalizedPrompt = String(editPrompt ?? "").trim();
+  const resolvedWidth = Math.max(256, Number(options.width ?? 0) || 1536);
+  const resolvedHeight = Math.max(256, Number(options.height ?? 0) || 1024);
+  const orientation = resolvedWidth >= resolvedHeight ? "landscape" : "portrait";
+  const requestedPayload = {
+    prompt: normalizedPrompt,
+    size: `${resolvedWidth}x${resolvedHeight}`,
+    orientation,
+    width: resolvedWidth,
+    height: resolvedHeight,
+    seed: options.seed ?? null,
+    input_image: String(options.referenceImageDataUrl ?? "").trim()
+  };
+  const payloadBuilder = getGenerationTransactionApi()?.buildImageEditPayload;
   if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
   return requestedPayload;
 }
@@ -1003,6 +1149,16 @@ function registerAssetPackSettings() {
     restricted: true
   });
 
+  game.settings.register(MODULE_ID, SETTING_REFERENCE_LIBRARY_CONFIG, {
+    name: "Reference Library Configuration",
+    hint: "SceneForge backend reference categories used for guided generation.",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: DEFAULT_REFERENCE_LIBRARY_CONFIG,
+    restricted: true
+  });
+
   game.settings.register(MODULE_ID, SETTING_AUTO_ACTIVATE_GENERATED_SCENE, {
     name: "Auto-Activate Generated Scene",
     hint: "Automatically activate and display the new Scene when map generation finishes.",
@@ -1138,6 +1294,115 @@ function getBflApiKey() {
 
 function getSubscriptionBackendUrl() {
   return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
+}
+
+function getReferenceLibraryConfig() {
+  const rawConfig = game.settings.get(MODULE_ID, SETTING_REFERENCE_LIBRARY_CONFIG);
+  const fallback = DEFAULT_REFERENCE_LIBRARY_CONFIG;
+  if (!rawConfig || typeof rawConfig !== "object") return fallback;
+  const categories = Array.isArray(rawConfig.categories) ? rawConfig.categories : fallback.categories;
+  return {
+    version: Number(rawConfig.version ?? fallback.version) || fallback.version,
+    categories
+  };
+}
+
+function normalizeReferenceKeywordPattern(keyword) {
+  return String(keyword ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+}
+
+function normalizeReferenceLibraryEntry(entry = {}) {
+  const id = String(entry.id ?? "").trim().toLowerCase();
+  if (!id) return null;
+  const enabled = entry.enabled !== false;
+  const keywords = Array.isArray(entry.keywords)
+    ? entry.keywords.map(normalizeReferenceKeywordPattern).filter((value) => value.length > 0)
+    : [];
+  if (!keywords.length) return null;
+  const referenceImagePath = String(entry.referenceImagePath ?? "").trim();
+  const referenceInstruction = String(entry.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim() || REFERENCE_GUIDANCE_SUFFIX;
+  const backendManaged = entry.backendManaged !== false;
+  return {
+    id,
+    enabled,
+    backendManaged,
+    keywords,
+    referenceImagePath,
+    referenceInstruction
+  };
+}
+
+function getReferenceLibraryEntries() {
+  const config = getReferenceLibraryConfig();
+  const categories = Array.isArray(config?.categories) ? config.categories : [];
+  const normalized = categories
+    .map((category) => normalizeReferenceLibraryEntry(category))
+    .filter((category) => category && category.enabled);
+  return normalized;
+}
+
+function detectReferenceCategoryFromPrompt(prompt) {
+  const source = String(prompt ?? "").trim().toLowerCase();
+  if (!source) return null;
+  for (const category of getReferenceLibraryEntries()) {
+    for (const keywordPattern of category.keywords) {
+      const matcher = new RegExp(`(^|[^a-z0-9])${keywordPattern}([^a-z0-9]|$)`, "i");
+      if (matcher.test(source)) {
+        return {
+          categoryId: category.id,
+          matchedKeyword: keywordPattern.replace(/\\s\+/g, " ").replace(/\\/g, ""),
+          referenceInstruction: category.referenceInstruction,
+          referenceImagePath: category.referenceImagePath
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function buildReferenceImageUrl(referenceImagePath) {
+  const normalizedPath = String(referenceImagePath ?? "").trim();
+  if (!normalizedPath) return "";
+  if (/^https?:\/\//i.test(normalizedPath)) return normalizedPath;
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  if (!backendBaseUrl) return "";
+  return `${backendBaseUrl}${normalizedPath.startsWith("/") ? "" : "/"}${normalizedPath}`;
+}
+
+function resolveGenerationReferenceContext(prompt) {
+  const detection = detectReferenceCategoryFromPrompt(prompt);
+  if (!detection) return null;
+  const matchedEntry = getReferenceLibraryEntries().find((entry) => entry.id === detection.categoryId) ?? null;
+  const backendManaged = matchedEntry?.backendManaged !== false;
+  return {
+    categoryId: detection.categoryId,
+    matchedKeyword: detection.matchedKeyword,
+    referenceInstruction: detection.referenceInstruction,
+    referenceImagePath: detection.referenceImagePath,
+    backendManaged,
+    referenceImageUrl: backendManaged ? "" : buildReferenceImageUrl(detection.referenceImagePath)
+  };
+}
+
+function buildReferenceVariationGuidance(referenceContext, options = {}) {
+  if (!referenceContext) return "";
+  const sourcePrompt = String(options.sourcePrompt ?? "").trim().toLowerCase();
+  const seed = String(options.seed ?? "").trim().toLowerCase();
+  const basis = `${referenceContext.categoryId}|${sourcePrompt}|${seed}`;
+  let hash = 0;
+  for (let idx = 0; idx < basis.length; idx += 1) {
+    hash = ((hash << 5) - hash + basis.charCodeAt(idx)) | 0;
+  }
+  const profileIndex = Math.abs(hash) % REFERENCE_LAYOUT_VARIATION_PROFILES.length;
+  const selectedProfile = REFERENCE_LAYOUT_VARIATION_PROFILES[profileIndex] ?? REFERENCE_LAYOUT_VARIATION_PROFILES[0];
+  return [
+    "REFERENCE DIVERSITY REQUIREMENT: OUTPUT MUST BE VISIBLY DISTINCT FROM THE REFERENCE IMAGE.",
+    selectedProfile
+  ].join("\n");
 }
 
 function shouldAutoActivateGeneratedScene() {
@@ -1736,10 +2001,10 @@ Hooks.on("renderSceneDirectory", (app, html) => {
  */
 function registerSceneDirectoryEntryContextOptions(entryOptions) {
   if (!Array.isArray(entryOptions)) return;
-  if (entryOptions.some((option) => option?.name === "Edit Image (SceneForge AI)")) return;
+  if (entryOptions.some((option) => option?.name === "Edit Map (SceneForge AI)")) return;
 
   entryOptions.push({
-    name: "Edit Image (SceneForge AI)",
+    name: "Edit Map (SceneForge AI)",
     icon: '<i class="fas fa-image"></i>',
     condition: () => game.user?.isGM === true,
     callback: async (li) => {
@@ -2002,25 +2267,93 @@ async function openGeneratorDialog(initialState = null) {
     content,
     classes: ["sceneforge-generator-dialog"],
     buttons: {
-      generate: {
-        icon: '<i class="fas fa-wand-magic-sparkles"></i>',
-        label: "Generate Map",
-        callback: async (dialogHtml) => {
-          await handleGenerate(dialogHtml);
-        }
-      },
       cancel: {
         icon: '<i class="fas fa-times"></i>',
         label: "Cancel"
       }
     },
-    default: "generate",
     render: (dialogHtml) => {
       const dialogWindow = dialogHtml?.closest?.(".app.window-app");
       if (dialogWindow?.length) {
         dialogWindow.addClass("sceneforge-generator-dialog");
       }
       wireAutoDetectUi(dialogHtml, initialState);
+      const rootElement = getHtmlElement(dialogHtml);
+      const formElement = rootElement?.querySelector(".sceneforge-generate-form");
+      const submitButton = rootElement?.querySelector(".sceneforge-generate-submit");
+      const statusField = rootElement?.querySelector(".sceneforge-generate-status");
+      const progressTrack = rootElement?.querySelector(".sceneforge-generate-progress");
+      const progressBar = rootElement?.querySelector(".sceneforge-generate-progress-bar");
+      if (!formElement || !submitButton || !statusField || !progressTrack || !progressBar) return;
+
+      let isSubmitting = false;
+      let displayedProgress = 0;
+      let targetProgress = 0;
+      let progressTimer = null;
+
+      const syncProgressUi = () => {
+        progressBar.style.width = `${Math.max(0, Math.min(100, displayedProgress))}%`;
+      };
+      const ensureProgressTimer = () => {
+        if (progressTimer) return;
+        progressTimer = window.setInterval(() => {
+          if (displayedProgress >= targetProgress) return;
+          displayedProgress = Math.min(targetProgress, displayedProgress + 1);
+          syncProgressUi();
+        }, 90);
+      };
+      const setProgressStage = (label, percent) => {
+        targetProgress = Math.max(targetProgress, Math.min(100, Number(percent) || 0));
+        if (typeof label === "string" && label.trim()) {
+          statusField.textContent = label.trim();
+        }
+        progressTrack.classList.add("is-active");
+        ensureProgressTimer();
+      };
+      const resetProgressUi = () => {
+        if (progressTimer) {
+          window.clearInterval(progressTimer);
+          progressTimer = null;
+        }
+        displayedProgress = 0;
+        targetProgress = 0;
+        progressBar.style.width = "0%";
+        progressTrack.classList.remove("is-active");
+        statusField.textContent = "";
+      };
+
+      formElement.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (isSubmitting) return;
+        isSubmitting = true;
+        submitButton.disabled = true;
+        submitButton.classList.add("disabled");
+        submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+        setProgressStage("Preparing generation request...", 8);
+
+        const success = await handleGenerate(dialogHtml, {
+          onProgress: ({ label, percent }) => {
+            setProgressStage(label, percent);
+          }
+        });
+
+        if (success) {
+          setProgressStage("Complete. Opening your new map...", 100);
+          await new Promise((resolve) => window.setTimeout(resolve, 240));
+          if (progressTimer) {
+            window.clearInterval(progressTimer);
+            progressTimer = null;
+          }
+          dialog.close();
+          return;
+        }
+
+        isSubmitting = false;
+        submitButton.disabled = false;
+        submitButton.classList.remove("disabled");
+        submitButton.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Generate Map';
+        resetProgressUi();
+      });
     }
   });
 
@@ -2085,12 +2418,16 @@ function applyDetectedSettingsToControls(form, detected) {
 /**
  * Handle first-time generation from dialog values.
  */
-async function handleGenerate(dialogHtml) {
+async function handleGenerate(dialogHtml, options = {}) {
   const form = dialogHtml.find(".sceneforge-form");
   const generationConfig = buildGenerationConfigFromForm(form);
-  if (!generationConfig) return;
+  if (!generationConfig) return false;
 
-  await createMockAiSceneFromGenerationData(generationConfig.generationData, generationConfig.seedWasAutoGenerated);
+  return createMockAiSceneFromGenerationData(
+    generationConfig.generationData,
+    generationConfig.seedWasAutoGenerated,
+    { onProgress: options?.onProgress }
+  );
 }
 
 /**
@@ -2151,7 +2488,7 @@ function buildGenerationConfigFromForm(form) {
     enabledAssetPacks: [],
     generationLayers: ["background-image"],
     seed,
-    moduleVersion: "0.21.0"
+    moduleVersion: "1.20"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -2423,6 +2760,11 @@ async function openGenerationPreviewDialog(config, previewData) {
  */
 async function createSceneFromGenerationData(generationData, seedWasAutoGenerated = false, options = {}) {
   const { backgroundPath = null, imageGenerationMetadata = null, sceneNamePrefix = "SceneForge" } = options;
+  const reportProgress = (label, percent) => {
+    if (typeof options?.onProgress === "function") {
+      options.onProgress({ label, percent });
+    }
+  };
   const isAiImageMode = generationData?.generationMode === "ai-image-only" || generationData?.generationMode === "ai-planner";
   const activeProvider = imageGenerationMetadata?.provider ?? getAiImageProvider();
   if (isAiImageMode) {
@@ -2445,7 +2787,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       if (activeProvider === "openai") {
         debugLog("OpenAI generation failed, aborting scene creation");
       }
-      return;
+      return false;
     }
   }
 
@@ -2462,6 +2804,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
 
   let createdScene = null;
   try {
+    reportProgress("Creating Foundry scene document...", 84);
     let resolvedGenerationData = imageGenerationMetadata
       ? { ...generationData, imageGeneration: imageGenerationMetadata }
       : generationData;
@@ -2472,7 +2815,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       height: heightPx,
       padding: 0.1,
       grid: {
-        type: CONST.GRID_TYPES.SQUARE,
+        type: CONST.GRID_TYPES.GRIDLESS,
         size: gridPixelSize,
         distance: metersPerGrid,
         units: "m"
@@ -2522,7 +2865,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         });
         await scene.delete();
         ui.notifications.error("SceneForge AI: Could not save generated image locally. Scene was not created.");
-        return;
+        return false;
       }
 
       // Reduce blur by matching scene pixel dimensions to the generated image.
@@ -2540,7 +2883,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
           width: resolvedImageWidth,
           height: resolvedImageHeight,
           grid: {
-            type: CONST.GRID_TYPES.SQUARE,
+            type: CONST.GRID_TYPES.GRIDLESS,
             size: resolvedGridPixelSize,
             distance: metersPerGrid,
             units: "m"
@@ -2550,6 +2893,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       }
 
       const backgroundApplyResult = await applyBackgroundToScene(scene, persistedBackgroundPath);
+      reportProgress("Applying generated map background...", 94);
       const updatedBackgroundSrc = backgroundApplyResult.finalBackgroundSrc;
       debugLog("Scene background after update", updatedBackgroundSrc);
       backgroundVerified = Boolean(persistedBackgroundPath) && backgroundApplyResult.applied;
@@ -2565,7 +2909,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         });
         await scene.delete();
         ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
-        return;
+        return false;
       }
 
       if (backgroundVerified) {
@@ -2577,6 +2921,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (resolvedGenerationData.imageGeneration) {
       await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, resolvedGenerationData.imageGeneration);
     }
+    await setStoredSceneOriginalPrompt(scene, resolvedGenerationData?.prompt ?? "");
 
     if (persistedBackgroundPath) {
       if (resolvedGenerationData.imageGeneration?.provider === "cache" && resolvedGenerationData.imageGeneration?.cacheEntryId) {
@@ -2598,6 +2943,7 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
     if (shouldShowCreatedSuccess) {
       ui.notifications.info(`SceneForge AI: Created "${scene.name}" successfully.`);
     }
+    reportProgress("Finalizing scene setup...", 98);
     if (shouldAutoActivateGeneratedScene()) {
       try {
         await scene.activate();
@@ -2606,6 +2952,8 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
       }
     }
     await promptForGeneratedSceneVote(scene);
+    reportProgress("Generation complete.", 100);
+    return true;
   } catch (error) {
     if ((activeProvider === "openai" || activeProvider === "subscription" || activeProvider === "cache") && createdScene) {
       logImagePipelineError("scene creation failed after OpenAI image generation", {
@@ -2619,29 +2967,38 @@ async function createSceneFromGenerationData(generationData, seedWasAutoGenerate
         // Ignore cleanup errors; original failure is reported below.
       }
       ui.notifications.error("SceneForge AI: Map image failed to apply. Scene was not created.");
-      return;
+      return false;
     }
     console.error(`${MODULE_ID} | Scene generation failed`, error);
     ui.notifications.error("SceneForge AI: Failed to generate scene. Check browser console for details.");
+    return false;
   }
 }
 
 /**
  * Main image-generation path using configured provider architecture.
  */
-async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false) {
+async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGenerated = false, options = {}) {
+  const reportProgress = (label, percent) => {
+    if (typeof options?.onProgress === "function") {
+      options.onProgress({ label, percent });
+    }
+  };
+  reportProgress("Validating map request...", 12);
+
   if (isGlobalLibraryOnlyModeEnabled()) {
     const provider = getAiImageProvider();
     if (provider !== "subscription") {
       ui.notifications.error("SceneForge AI: Global library mode requires AI provider set to Subscription Backend.");
-      return;
+      return false;
     }
     if (!canUseGlobalImageDumpLibrary()) {
       ui.notifications.error("SceneForge AI: Global library mode requires backend URL and subscription auth token.");
-      return;
+      return false;
     }
   }
 
+  reportProgress("Checking global map library...", 24);
   let reusableEntry = null;
   try {
     reusableEntry = await findReusableImageEntryForPrompt(generationData?.prompt ?? "");
@@ -2667,40 +3024,54 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
       },
       cacheEntryId: reusableEntry.id
     };
-    await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+    reportProgress("Reusing matching map from global library...", 68);
+    const reusedSceneCreated = await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
       backgroundPath: reusableEntry.imagePath,
       imageGenerationMetadata,
-      sceneNamePrefix: "SceneForge Cached"
+      sceneNamePrefix: "SceneForge Cached",
+      onProgress: options?.onProgress
     });
-    return;
+    return Boolean(reusedSceneCreated);
   }
 
   const provider = getAiImageProvider();
   if (provider === "none") {
     logImagePipelineError("no AI provider selected", { provider });
     ui.notifications.error("SceneForge AI: No AI image provider selected.");
-    return;
+    return false;
   }
   if (provider === "openai" && !getOpenAiApiKey()) {
     logImagePipelineError("OpenAI API key missing", { provider });
     ui.notifications.error("SceneForge AI: OpenAI API key required before AI map generation.");
-    return;
+    return false;
   }
   if (provider === "bfl" && !getBflApiKey()) {
     logImagePipelineError("BFL API key missing", { provider });
     ui.notifications.error("SceneForge AI: BFL API key required before AI map generation.");
-    return;
+    return false;
   }
   if (provider === "openai") {
     debugLog("OpenAI generation path called");
   }
 
   const compiledPrompt = generationData.compiledImagePrompt ?? "";
+  reportProgress("Preparing AI map prompt...", 38);
+  const referenceContext = resolveGenerationReferenceContext(generationData?.prompt ?? "");
+  if (referenceContext) {
+    console.info(`${MODULE_ID} | Generation reference selected`, {
+      categoryId: referenceContext.categoryId,
+      matchedKeyword: referenceContext.matchedKeyword
+    });
+  }
+  reportProgress("Requesting AI map image...", 56);
   const imageResult = await generateAiMapImage(compiledPrompt, {
     seed: generationData.seed,
+    sourcePrompt: generationData?.prompt ?? "",
     imageSize: generationData.imageSize ?? getRequestedImageSize(generationData.sceneSizeKey, generationData.imageOrientation),
-    imageOrientation: generationData.imageOrientation ?? "landscape"
+    imageOrientation: generationData.imageOrientation ?? "landscape",
+    referenceContext
   });
+  reportProgress("AI image generated. Building scene...", 74);
   debugLog("AI imageResult", imageResult);
 
   if (imageResult?.imageStatus === "failed") {
@@ -2715,7 +3086,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     if (imageResult?.provider === "openai") {
       debugLog("OpenAI generation failed, aborting scene creation");
     }
-    return;
+    return false;
   }
 
   const validImageForScene = (
@@ -2736,7 +3107,7 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     if (imageResult?.provider === "openai") {
       debugLog("OpenAI generation failed, aborting scene creation");
     }
-    return;
+    return false;
   }
 
   const imageGenerationMetadata = {
@@ -2745,49 +3116,20 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     imageStatus: imageResult.imageStatus,
     imagePath: imageResult.imagePath,
     costEstimate: imageResult.costEstimate,
-    generationMetadata: imageResult.generationMetadata ?? null
+    generationMetadata: imageResult.generationMetadata ?? null,
+    referenceCategory: referenceContext?.categoryId ?? null
   };
 
   if (imageResult?.provider === "subscription" && imageResult?.generationMetadata) {
     debugLog("Subscription generation metadata returned to module", imageResult.generationMetadata);
   }
 
-  await createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
+  return createSceneFromGenerationData(generationData, seedWasAutoGenerated, {
     backgroundPath: imageResult.imagePath ?? null,
     imageGenerationMetadata,
-    sceneNamePrefix: imageResult.provider === "mock" ? "SceneForge Mock Test Scene" : "SceneForge"
+    sceneNamePrefix: imageResult.provider === "mock" ? "SceneForge Mock Test Scene" : "SceneForge",
+    onProgress: options?.onProgress
   });
-}
-
-function buildSceneImageEditPrompt(userInstructions, preserveOptions, strength) {
-  const selectedPreserve = [];
-  if (preserveOptions?.artStyle) selectedPreserve.push("Art style");
-  if (preserveOptions?.lighting) selectedPreserve.push("Lighting");
-  if (preserveOptions?.terrain) selectedPreserve.push("Terrain");
-  if (preserveOptions?.structures) selectedPreserve.push("Structures");
-  const preserveLine = selectedPreserve.length > 0 ? selectedPreserve.join(", ") : "None selected";
-
-  return [
-    "You are editing an existing top-down fantasy battle map. Make only the requested changes. Preserve the original camera angle, art style, lighting, terrain, composition, and map usability unless the user specifically asks otherwise.",
-    "",
-    `USER EDIT:\n${String(userInstructions ?? "").trim()}`,
-    "",
-    `PRESERVE:\n${preserveLine}`,
-    "",
-    `CHANGE STRENGTH:\nApply approximately ${Math.max(0, Math.min(100, Number(strength) || 0))}% change. Lower strength means minimal edits and maximum consistency.`,
-    "",
-    "HARD CONSTRAINTS:",
-    "- Keep TRUE TOP DOWN battle map perspective.",
-    "- Keep 90 degree orthographic camera.",
-    "- Keep gridless VTT map format.",
-    "- No characters.",
-    "- No text.",
-    "- No labels.",
-    "- No UI elements.",
-    "- No isometric angle.",
-    "- No cinematic perspective.",
-    "- Return only the edited map image."
-  ].join("\n");
 }
 
 async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) {
@@ -2875,6 +3217,42 @@ async function editOpenAiMapImage(referenceImagePath, editPrompt, options = {}) 
   }
 }
 
+async function editSubscriptionMapImage(referenceImagePath, editPrompt, options = {}) {
+  try {
+    const referenceImage = await loadImageAsBlobOrFile(referenceImagePath, {
+      filenamePrefix: "sceneforge-edit-reference"
+    });
+    const referenceImageDataUrl = await imageBlobToOptimizedDataUrl(referenceImage.blob, {
+      maxBytes: 1_300_000,
+      maxDimension: 1280
+    });
+    if (!referenceImageDataUrl || !referenceImageDataUrl.startsWith("data:image/")) {
+      return {
+        provider: "subscription",
+        imageStatus: "failed",
+        imagePath: null,
+        errorMessage: "SceneForge AI: Could not prepare reference image for editing."
+      };
+    }
+    return generateSubscriptionMapImage(editPrompt, {
+      width: Number(options.width ?? 0) || undefined,
+      height: Number(options.height ?? 0) || undefined,
+      referenceImageDataUrl,
+      requestType: "image-edit"
+    });
+  } catch (error) {
+    logImagePipelineError("subscription edit reference image conversion failed", {
+      referenceImagePath
+    }, error);
+    return {
+      provider: "subscription",
+      imageStatus: "failed",
+      imagePath: null,
+      errorMessage: "SceneForge AI: Could not load the current map image for editing."
+    };
+  }
+}
+
 async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   const provider = getAiImageProvider();
   if (provider === "none") {
@@ -2899,6 +3277,9 @@ async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   if (provider === "openai") {
     return editOpenAiMapImage(referenceImagePath, editPrompt, options);
   }
+  if (provider === "subscription" || provider === "black-forest-labs") {
+    return editSubscriptionMapImage(referenceImagePath, editPrompt, options);
+  }
   return {
     provider,
     imageStatus: "failed",
@@ -2907,28 +3288,63 @@ async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   };
 }
 
+function compileSceneImageEditPrompt(scene, editPrompt) {
+  const normalizedPrompt = String(editPrompt ?? "").trim();
+  if (!normalizedPrompt) return "";
+  const generationData = scene?.getFlag?.(MODULE_ID, FLAG_GENERATION_KEY) ?? {};
+  const sceneSizeKey = String(generationData?.sceneSizeKey ?? "medium").trim().toLowerCase() || "medium";
+  const sceneWidth = Number(scene?.width ?? 0);
+  const sceneHeight = Number(scene?.height ?? 0);
+  const fallbackOrientation = sceneWidth > 0 && sceneHeight > 0
+    ? (sceneWidth === sceneHeight ? "square" : (sceneWidth > sceneHeight ? "landscape" : "portrait"))
+    : "landscape";
+  const imageOrientation = String(generationData?.imageOrientation ?? fallbackOrientation).trim().toLowerCase() || fallbackOrientation;
+  const mapCoverageMeters = Number(generationData?.mapCoverageMeters ?? getMapCoverageMeters(sceneSizeKey));
+  const buildingViewMode = String(generationData?.buildingViewMode ?? "interior").trim().toLowerCase() || "interior";
+  const compiledBasePrompt = compileInkarnatePrompt(normalizedPrompt, {
+    imageOrientation,
+    sceneSizeKey,
+    mapCoverageMeters,
+    buildingViewMode
+  });
+  const styleContinuityLines = [
+    "IMAGE-EDIT MODE: MODIFY ONLY THE PROVIDED REFERENCE MAP",
+    "PRESERVE THE EXISTING HAND-PAINTED INKARNATE STYLE, LINE WEIGHT, SHADING, TEXTURE LANGUAGE, AND COLOR PALETTE",
+    "KEEP THE SAME TOP-DOWN CAMERA, SCALE, VISUAL MATERIALS, AND RENDERING STYLE AS THE ORIGINAL MAP",
+    "DO NOT INTRODUCE INTERIOR MESH OVERLAYS, MIXED STYLES, OR CUTAWAY ARTIFACTS"
+  ];
+  return [compiledBasePrompt, ...styleContinuityLines].join("\n");
+}
+
 async function handleSceneImageEdit(scene, editConfig) {
   const originalBackgroundPath = getSceneBackgroundPath(scene);
   if (!originalBackgroundPath) {
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
-    return;
+    return false;
   }
   if (getAiImageProvider() === "none") {
     ui.notifications.error("SceneForge AI: No AI image provider selected.");
-    return;
+    return false;
   }
-  const editPrompt = buildSceneImageEditPrompt(
-    editConfig.instructions,
-    editConfig.preserveOptions,
-    editConfig.strength
-  );
-  const result = await editAiMapImage(originalBackgroundPath, editPrompt, {
-    strength: editConfig.strength,
-    preserveOptions: editConfig.preserveOptions
+  const editPrompt = String(editConfig?.prompt ?? "").trim();
+  if (!editPrompt) {
+    ui.notifications.warn("SceneForge AI: Please enter map edit instructions.");
+    return false;
+  }
+  const compiledEditPrompt = compileSceneImageEditPrompt(scene, editPrompt);
+  const result = await editAiMapImage(originalBackgroundPath, compiledEditPrompt, {
+    width: Number(scene?.width ?? 0) || undefined,
+    height: Number(scene?.height ?? 0) || undefined
   });
   if (!result?.imagePath || (result.imageStatus !== "complete" && result.imageStatus !== "mock-edited")) {
-    ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
-    return;
+    ui.notifications.error(result?.errorMessage || "SceneForge AI: Image edit failed. Original map was not changed.");
+    logImagePipelineError("scene image edit generation failed", {
+      sceneId: scene?.id ?? null,
+      provider: result?.provider ?? null,
+      imageStatus: result?.imageStatus ?? null,
+      errorMessage: result?.errorMessage ?? null
+    });
+    return false;
   }
 
   try {
@@ -2947,13 +3363,42 @@ async function handleSceneImageEdit(scene, editConfig) {
       await applyBackgroundToScene(scene, originalBackgroundPath);
       throw new Error("Scene background verification failed after edit.");
     }
+    await setStoredSceneOriginalPrompt(scene, editPrompt);
+    const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
+    if (generationData && typeof generationData === "object") {
+      await scene.setFlag(MODULE_ID, FLAG_GENERATION_KEY, {
+        ...generationData,
+        prompt: editPrompt,
+        imageGeneration: {
+          ...(generationData?.imageGeneration ?? {}),
+          ...(result?.generationMetadata ?? {}),
+          provider: result?.provider ?? generationData?.imageGeneration?.provider ?? "subscription",
+          compiledPrompt: compiledEditPrompt,
+          imageStatus: result?.imageStatus ?? "complete",
+          imagePath: persistedPath
+        },
+        lastGeneratedAt: Date.now()
+      });
+    }
+    await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, {
+      ...(result?.generationMetadata ?? {}),
+      provider: result?.provider ?? "subscription",
+      compiledPrompt: compiledEditPrompt,
+      imageStatus: result?.imageStatus ?? "complete",
+      imagePath: persistedPath
+    });
+    if (canvas?.scene?.id === scene?.id && typeof canvas.draw === "function") {
+      await canvas.draw();
+    }
     ui.notifications.info("SceneForge AI: Edited map applied successfully.");
+    return true;
   } catch (error) {
     logImagePipelineError("scene image edit apply failed", {
       sceneId: scene?.id ?? null,
       sceneName: scene?.name ?? null
     }, error);
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
+    return false;
   }
 }
 
@@ -2963,69 +3408,85 @@ async function openSceneImageEditDialog(scene) {
     ui.notifications.error("SceneForge AI: Image edit failed. Original map was not changed.");
     return;
   }
+  const storedPrompt = getStoredSceneOriginalPrompt(scene);
+  if (storedPrompt && !scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT)) {
+    // One-time migration for older generated scenes: recover prompt from existing generation metadata.
+    await setStoredSceneOriginalPrompt(scene, storedPrompt);
+  }
   const content = `
-<form class="sceneforge-edit-form">
-  <div class="form-group">
-    <label>Current Map</label>
-    <div style="margin-top:6px;">
-      <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" style="max-width:100%; max-height:220px; border-radius:6px; object-fit:contain;" />
-    </div>
+<form class="sceneforge-form sceneforge-generate-form sceneforge-edit-map-form">
+  <div class="sceneforge-field sceneforge-edit-map-preview">
+    <label class="sceneforge-field-label">Current Map</label>
+    <img src="${foundry.utils.escapeHTML(currentBackgroundPath)}" alt="Current scene map" />
   </div>
-  <div class="form-group">
-    <label for="sf-edit-instructions">Edit Instructions</label>
-    <textarea id="sf-edit-instructions" name="instructions" rows="5" placeholder="Example: Move the ship away from the pathway and dock it along the right side. Keep the beach, road, dock, and ocean unchanged." required></textarea>
+  <div class="sceneforge-field sceneforge-field-prompt sceneforge-edit-map-input">
+    <label class="sceneforge-field-label" for="sf-edit-map-prompt">Edit Your Map</label>
+    <textarea
+      id="sf-edit-map-prompt"
+      name="prompt"
+      rows="10"
+      placeholder="Describe what you want to change about this map..."
+    >${foundry.utils.escapeHTML(storedPrompt)}</textarea>
   </div>
-  <fieldset class="form-group">
-    <legend>Preserve</legend>
-    <label><input type="checkbox" name="preserveArtStyle" checked /> Art style</label><br/>
-    <label><input type="checkbox" name="preserveLighting" checked /> Lighting</label><br/>
-    <label><input type="checkbox" name="preserveTerrain" checked /> Terrain</label><br/>
-    <label><input type="checkbox" name="preserveStructures" checked /> Structures</label>
-  </fieldset>
-  <div class="form-group">
-    <label for="sf-edit-strength">Change Strength: <span class="sf-edit-strength-value">30</span>%</label>
-    <input id="sf-edit-strength" type="range" name="strength" min="0" max="100" value="30" />
+  <div class="sceneforge-edit-map-actions">
+    <button type="submit" class="sceneforge-edit-map-submit">
+      <i class="fas fa-wand-magic-sparkles"></i> Edit Map
+    </button>
+    <p class="sceneforge-edit-map-status" aria-live="polite"></p>
   </div>
 </form>
   `;
 
+  const viewportHeight = Number(window?.innerHeight ?? 0);
+  const preferredHeight = 1080;
+  const minimumHeight = 760;
+  const computedHeight = viewportHeight > 0
+    ? Math.max(minimumHeight, Math.min(preferredHeight, viewportHeight - 80))
+    : preferredHeight;
   const dialog = new Dialog({
-    title: "SceneForge AI - Edit Image",
+    title: "SceneForge AI - Edit Map",
     content,
-    buttons: {
-      generate: {
-        icon: '<i class="fas fa-wand-magic-sparkles"></i>',
-        label: "Generate Edited Image",
-        callback: async (dialogHtml) => {
-          const form = dialogHtml.find(".sceneforge-edit-form");
-          const instructions = String(form.find('[name="instructions"]').val() ?? "").trim();
-          if (!instructions) {
-            ui.notifications.warn("SceneForge AI: Please enter edit instructions.");
-            return;
-          }
-          await handleSceneImageEdit(scene, {
-            instructions,
-            preserveOptions: {
-              artStyle: form.find('[name="preserveArtStyle"]').is(":checked"),
-              lighting: form.find('[name="preserveLighting"]').is(":checked"),
-              terrain: form.find('[name="preserveTerrain"]').is(":checked"),
-              structures: form.find('[name="preserveStructures"]').is(":checked")
-            },
-            strength: Number(form.find('[name="strength"]').val() ?? 30)
-          });
-        }
-      },
-      cancel: {
-        icon: '<i class="fas fa-times"></i>',
-        label: "Cancel"
-      }
-    },
-    default: "generate",
+    classes: ["sceneforge-generator-dialog", "sceneforge-edit-map-dialog"],
+    width: 960,
+    height: computedHeight,
+    resizable: true,
+    buttons: {},
     render: (dialogHtml) => {
-      const slider = dialogHtml.find('[name="strength"]');
-      const strengthValue = dialogHtml.find(".sf-edit-strength-value");
-      slider.on("input change", () => {
-        strengthValue.text(String(slider.val() ?? 30));
+      const dialogWindow = dialogHtml?.closest?.(".app.window-app");
+      if (dialogWindow?.length) {
+        dialogWindow.addClass("sceneforge-generator-dialog sceneforge-edit-map-dialog");
+      }
+      const rootElement = getHtmlElement(dialogHtml);
+      const formElement = rootElement?.querySelector(".sceneforge-edit-map-form");
+      const promptField = rootElement?.querySelector('textarea[name="prompt"]');
+      const submitButton = rootElement?.querySelector(".sceneforge-edit-map-submit");
+      const statusField = rootElement?.querySelector(".sceneforge-edit-map-status");
+      if (!formElement || !promptField || !submitButton) return;
+
+      let isSubmitting = false;
+      formElement.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (isSubmitting) return;
+        const prompt = String(promptField.value ?? "").trim();
+        if (!prompt) {
+          ui.notifications.warn("SceneForge AI: Please enter map edit instructions.");
+          return;
+        }
+        isSubmitting = true;
+        submitButton.disabled = true;
+        submitButton.classList.add("disabled");
+        submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Editing...';
+        if (statusField) statusField.textContent = "Applying map edits...";
+        const success = await handleSceneImageEdit(scene, { prompt });
+        if (success) {
+          dialog.close();
+          return;
+        }
+        isSubmitting = false;
+        submitButton.disabled = false;
+        submitButton.classList.remove("disabled");
+        submitButton.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Edit Map';
+        if (statusField) statusField.textContent = "";
       });
     }
   });
@@ -3056,6 +3517,26 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const costEstimate = { preview: "included with subscription", final: "included with subscription" };
   const backendBaseUrl = getSubscriptionBackendUrl();
   const authFetch = getAuthApi()?.authenticatedFetch ?? fetch;
+  const ensureReachableReferenceContext = async (context) => {
+    if (!context) return null;
+    const referenceImageUrl = String(context?.referenceImageUrl ?? "").trim();
+    if (!referenceImageUrl) return context;
+    const probeReference = async (method) => {
+      const response = await authFetch(referenceImageUrl, { method });
+      return response.ok;
+    };
+    try {
+      if (await probeReference("HEAD")) return context;
+    } catch (_headError) {
+      // Some hosts do not support HEAD consistently; fallback to GET probe.
+    }
+    try {
+      if (await probeReference("GET")) return context;
+    } catch (_getError) {
+      // Unreachable reference image; fallback to normal generation path.
+    }
+    return null;
+  };
   debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   const token = getSubscriptionAuthToken();
 
@@ -3154,21 +3635,89 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     };
   }
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
+  const requestType = String(options.requestType ?? "text-to-image").trim().toLowerCase();
+  const isImageEditRequest = requestType === "image-edit";
+  let referenceContext = !isImageEditRequest ? (options.referenceContext ?? null) : null;
+  if (referenceContext) {
+    const reachableReferenceContext = await ensureReachableReferenceContext(referenceContext);
+    if (!reachableReferenceContext) {
+      logImagePipelineError("reference image unavailable, falling back to normal generation", {
+        referenceCategory: referenceContext?.categoryId ?? null,
+        referenceImageUrl: referenceContext?.referenceImageUrl ?? null
+      });
+      referenceContext = null;
+    }
+  }
+  const referenceVariationGuidance = referenceContext
+    ? buildReferenceVariationGuidance(referenceContext, {
+      sourcePrompt: options?.sourcePrompt ?? "",
+      seed: options?.seed ?? ""
+    })
+    : "";
+  const effectivePrompt = referenceContext
+    ? [
+      String(compiledPrompt ?? "").trim(),
+      String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim(),
+      String(referenceVariationGuidance ?? "").trim()
+    ].filter(Boolean).join("\n")
+    : String(compiledPrompt ?? "").trim();
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
-  const requestPayload = buildTextToImageRequestPayload(compiledPrompt, options);
+  let requestPayload = isImageEditRequest
+    ? buildImageEditRequestPayload(compiledPrompt, options)
+    : buildTextToImageRequestPayload(effectivePrompt, {
+      ...options,
+      referenceContext
+    });
+  if (referenceContext) {
+    console.info(`${MODULE_ID} | Reference-guided generation payload enabled`, {
+      referenceCategory: referenceContext.categoryId,
+      hasReferenceImageUrl: Boolean(referenceContext.referenceImageUrl)
+    });
+  }
   logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
 
   try {
-    const response = await authFetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey
-      },
-      body: JSON.stringify(requestPayload)
-    });
-
-    const payload = await response.json().catch(() => ({}));
+    let response = null;
+    let payload = {};
+    let activeReferenceContext = referenceContext;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await authFetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey
+        },
+        body: JSON.stringify(requestPayload)
+      });
+      payload = await response.json().catch(() => ({}));
+      if (response.ok) break;
+      const backendReasonCode = String(payload?.reason ?? payload?.errorCode ?? payload?.code ?? "").toLowerCase();
+      const backendDetailText = String(payload?.detail ?? payload?.message ?? "").toLowerCase();
+      const shouldFallbackToNormalGeneration = (
+        !isImageEditRequest
+        && Boolean(activeReferenceContext)
+        && attempt === 0
+        && (
+          backendReasonCode === "reference_image_unavailable"
+          || (backendDetailText.includes("reference image") && backendDetailText.includes("not configured"))
+        )
+      );
+      if (shouldFallbackToNormalGeneration) {
+        logImagePipelineError("reference generation unavailable from backend, retrying without reference", {
+          referenceCategory: activeReferenceContext?.categoryId ?? null,
+          status: response.status,
+          reason: payload?.reason ?? null
+        });
+        activeReferenceContext = null;
+        requestPayload = buildTextToImageRequestPayload(String(compiledPrompt ?? "").trim(), {
+          ...options,
+          referenceContext: null
+        });
+        logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
+        continue;
+      }
+      break;
+    }
     if (!response.ok) {
       await attemptRefundWithContract({
         idempotencyKey,
@@ -3262,7 +3811,9 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         imageStatus: "failed",
         imagePath: null,
         costEstimate,
-        errorMessage: "Subscription backend returned no map image."
+        errorMessage: isImageEditRequest
+          ? "Subscription backend returned no edited map image."
+          : "Subscription backend returned no map image."
       };
     }
 
@@ -3292,7 +3843,10 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       imageStatus: "complete",
       imagePath: String(imagePath),
       costEstimate,
-      generationMetadata
+      generationMetadata: {
+        ...(generationMetadata ?? {}),
+        referenceCategory: activeReferenceContext?.categoryId ?? null
+      }
     };
   } catch (error) {
     const refundResult = await attemptRefundWithContract({
@@ -4022,7 +4576,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "0.21.0",
+    version: generationData.moduleVersion ?? "1.20",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-image-only",
@@ -4141,7 +4695,7 @@ function validateImportedPreset(rawPreset) {
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: ["background-image"],
     seed,
-    moduleVersion: "0.21.0"
+    moduleVersion: "1.20"
   };
 
   return {
@@ -4170,7 +4724,7 @@ async function importPresetAsNewScene(generationData, sourceVersion = "unknown",
     height: heightPx,
     padding: 0.1,
     grid: {
-      type: CONST.GRID_TYPES.SQUARE,
+      type: CONST.GRID_TYPES.GRIDLESS,
       size: gridPixelSize,
       distance: metersPerGrid,
       units: "m"
@@ -4316,7 +4870,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     width: widthPx,
     height: heightPx,
     grid: {
-      type: CONST.GRID_TYPES.SQUARE,
+      type: CONST.GRID_TYPES.GRIDLESS,
       size: gridPixelSize,
       distance: metersPerGrid,
       units: "m"
@@ -4349,13 +4903,14 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: [],
     generationLayers,
     seed,
-    moduleVersion: "0.21.0",
+    moduleVersion: "1.20",
     lastGeneratedAt: Date.now()
   });
 
   if (generationData.imageGeneration) {
     await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, generationData.imageGeneration);
   }
+  await setStoredSceneOriginalPrompt(scene, prompt);
 }
 
 /**
@@ -5214,6 +5769,12 @@ function compileInkarnatePrompt(prompt, options = {}) {
       "WALLS MUST ALIGN TO ENCLOSING ROOM SHAPES; NO FLOATING WALLS OR DEAD-END PASSAGES WITHOUT PURPOSE",
       "DOOR PLACEMENT MUST CONNECT SPACES LOGICALLY AND SUPPORT CONTINUOUS NAVIGATION ACROSS THE MAP"
     ];
+  const interiorSpecificLines = buildingViewMode === "roofs-no-interior"
+    ? []
+    : INTERIOR_LAYOUT_HARD_REQUIREMENTS;
+  const tavernSpecificLines = (buildingViewMode === "roofs-no-interior" || !isTavernLikePrompt(sourcePrompt))
+    ? []
+    : TAVERN_INTERIOR_HARD_REQUIREMENTS;
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
@@ -5229,6 +5790,8 @@ function compileInkarnatePrompt(prompt, options = {}) {
     "IF A STRUCTURE APPEARS, FORCE IT INTO FLAT TOP-DOWN ROOF OR FLOOR FOOTPRINT",
     buildingViewLine,
     ...spatialIntegrityLines,
+    ...interiorSpecificLines,
+    ...tavernSpecificLines,
     "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
     "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
     "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",

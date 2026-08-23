@@ -238,6 +238,22 @@ test("normal text-to-image payload contains no image-input fields", () => {
   assert.equal(transactionApi.buildGeneratePayloadSummary(payload, { idempotencyKey: "idem-foo-1234" }).hasImageInputField, false);
 });
 
+test("reference-guided text-to-image payload includes reference fields", () => {
+  const payload = transactionApi.buildTextToImagePayload({
+    prompt: "A medieval tavern interior with a large bar and fireplace",
+    size: "1536x1024",
+    orientation: "landscape",
+    width: 1536,
+    height: 1024,
+    reference_category: "tavern",
+    reference_instruction: "Use the supplied reference image as layout guidance while creating a new original map."
+  });
+  assert.equal(payload.reference_category, "tavern");
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "reference_image_url"), false);
+  assert.match(payload.reference_instruction, /layout guidance/i);
+  assert.equal(transactionApi.detectImageInputFields(payload).length, 0);
+});
+
 test("empty image/input fields are omitted from payload", () => {
   const payload = transactionApi.buildTextToImagePayload({
     prompt: "A dungeon",
@@ -283,6 +299,31 @@ test("orientation retry payload has no image input fields", () => {
   assert.equal(summary.orientation, "portrait");
   assert.equal(summary.hasImageInputField, false);
   assert.deepEqual(summary.imageInputFields, []);
+});
+
+test("image edit payload retains input_image reference field", () => {
+  const payload = transactionApi.buildImageEditPayload({
+    prompt: "Add a fountain in the center square.",
+    size: "1536x1024",
+    orientation: "landscape",
+    width: 1536,
+    height: 1024,
+    input_image: "data:image/png;base64,abc123"
+  });
+  assert.equal(payload.input_image, "data:image/png;base64,abc123");
+  const summary = transactionApi.buildGeneratePayloadSummary(payload, { idempotencyKey: "idem-edit-1234" });
+  assert.equal(summary.hasImageInputField, true);
+  assert.deepEqual(summary.imageInputFields, ["input_image"]);
+});
+
+test("image edit payload omits empty input_image", () => {
+  const payload = transactionApi.buildImageEditPayload({
+    prompt: "Rainy weather",
+    size: "1536x1024",
+    orientation: "landscape",
+    input_image: ""
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "input_image"), false);
 });
 
 test("completion 404 not found allows one retry then stops with diagnostics", () => {

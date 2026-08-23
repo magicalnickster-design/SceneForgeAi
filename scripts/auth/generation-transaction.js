@@ -155,7 +155,10 @@
     orientation,
     width,
     height,
-    seed
+    seed,
+    reference_category,
+    reference_image_url,
+    reference_instruction
   } = {}) {
     const payload = {
       prompt: normalizeStringField(prompt),
@@ -168,7 +171,40 @@
       const normalizedSeed = normalizeStringField(seed);
       if (normalizedSeed) payload.seed = normalizedSeed;
     }
+    const referenceCategory = normalizeStringField(reference_category);
+    const referenceImageUrl = normalizeStringField(reference_image_url);
+    const referenceInstruction = normalizeStringField(reference_instruction);
+    if (referenceCategory) payload.reference_category = referenceCategory;
+    if (referenceImageUrl) payload.reference_image_url = referenceImageUrl;
+    if (referenceInstruction) payload.reference_instruction = referenceInstruction;
     return stripImageInputFields(payload);
+  }
+
+  function buildImageEditPayload({
+    prompt,
+    size,
+    orientation,
+    width,
+    height,
+    seed,
+    input_image
+  } = {}) {
+    const payload = {
+      prompt: normalizeStringField(prompt),
+      size: normalizeStringField(size),
+      orientation: normalizeStringField(orientation),
+      input_image: normalizeStringField(input_image)
+    };
+    if (isFiniteNumber(width)) payload.width = Number(width);
+    if (isFiniteNumber(height)) payload.height = Number(height);
+    if (seed !== undefined && seed !== null) {
+      const normalizedSeed = normalizeStringField(seed);
+      if (normalizedSeed) payload.seed = normalizedSeed;
+    }
+    if (!payload.input_image) {
+      delete payload.input_image;
+    }
+    return payload;
   }
 
   function detectImageInputFields(payload = {}) {
@@ -256,6 +292,7 @@
     redactSupportKey,
     buildRefundContractDecision,
     buildTextToImagePayload,
+    buildImageEditPayload,
     buildGeneratePayloadSummary,
     stripImageInputFields,
     detectImageInputFields,
