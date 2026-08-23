@@ -10,7 +10,8 @@
   ],
   "compatibility": {
     "minimum": "12",
-    "verified": "12"
+    "verified": "14",
+    "maximum": "14"
   },
   "scripts": [
     "scripts/auth/session-store.js",
