@@ -637,10 +637,24 @@ const SETTING_AUTO_ACTIVATE_GENERATED_SCENE = "autoActivateGeneratedScene";
 const SETTING_SUBSCRIPTION_ACCOUNT_STATE = "subscriptionAccountState";
 const SETTING_IMAGE_DUMP_LIBRARY = "imageDumpLibrary";
 const SETTING_GLOBAL_LIBRARY_ONLY_MODE = "globalLibraryOnlyMode";
+const SETTING_REFERENCE_LIBRARY_CONFIG = "referenceLibraryConfig";
 const DEFAULT_BACKEND_URL = "https://sceneforge-backend.onrender.com";
 const DEFAULT_AUTH_API_BASE_URL = "https://gambitsforge.online";
 const NOTIFICATION_THROTTLE_MS = 5000;
 const NOTIFICATION_LAST_AT = new Map();
+const REFERENCE_GUIDANCE_SUFFIX = "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition. Create a new original environment based on the user's requested description. Do not recreate or copy the exact reference layout.";
+const DEFAULT_REFERENCE_LIBRARY_CONFIG = {
+  version: 1,
+  categories: [
+    {
+      id: "tavern",
+      enabled: true,
+      keywords: ["tavern", "inn", "pub", "alehouse", "taproom"],
+      referenceImagePath: "/api/maps/references/tavern",
+      referenceInstruction: REFERENCE_GUIDANCE_SUFFIX
+    }
+  ]
+};
 
 function notifyThrottled(type, message, options = {}) {
   const normalizedOptions = options && typeof options === "object" ? options : {};
@@ -868,13 +882,17 @@ function extractReservationIdentifier(payload) {
 function buildTextToImageRequestPayload(compiledPrompt, options = {}) {
   const normalizedPrompt = String(compiledPrompt ?? "").trim();
   const parsedImageSize = parseImageSizeString(options.imageSize ?? "1536x1024");
+  const referenceContext = options.referenceContext ?? null;
   const requestedPayload = {
     prompt: normalizedPrompt,
     size: String(options.imageSize ?? "1536x1024"),
     orientation: String(options.imageOrientation ?? "landscape").trim().toLowerCase(),
     width: parsedImageSize?.width ?? null,
     height: parsedImageSize?.height ?? null,
-    seed: options.seed ?? null
+    seed: options.seed ?? null,
+    reference_category: referenceContext?.categoryId ?? null,
+    reference_image_url: String(referenceContext?.referenceImageUrl ?? "").trim() || null,
+    reference_instruction: String(referenceContext?.referenceInstruction ?? "").trim() || null
   };
   const payloadBuilder = getGenerationTransactionApi()?.buildTextToImagePayload;
   if (typeof payloadBuilder === "function") return payloadBuilder(requestedPayload);
@@ -1097,6 +1115,16 @@ function registerAssetPackSettings() {
     restricted: true
   });
 
+  game.settings.register(MODULE_ID, SETTING_REFERENCE_LIBRARY_CONFIG, {
+    name: "Reference Library Configuration",
+    hint: "SceneForge backend reference categories used for guided generation.",
+    scope: "world",
+    config: false,
+    type: Object,
+    default: DEFAULT_REFERENCE_LIBRARY_CONFIG,
+    restricted: true
+  });
+
   game.settings.register(MODULE_ID, SETTING_AUTO_ACTIVATE_GENERATED_SCENE, {
     name: "Auto-Activate Generated Scene",
     hint: "Automatically activate and display the new Scene when map generation finishes.",
@@ -1232,6 +1260,93 @@ function getBflApiKey() {
 
 function getSubscriptionBackendUrl() {
   return String(game.settings.get(MODULE_ID, SETTING_SUBSCRIPTION_BACKEND_URL) ?? "").trim().replace(/\/+$/, "");
+}
+
+function getReferenceLibraryConfig() {
+  const rawConfig = game.settings.get(MODULE_ID, SETTING_REFERENCE_LIBRARY_CONFIG);
+  const fallback = DEFAULT_REFERENCE_LIBRARY_CONFIG;
+  if (!rawConfig || typeof rawConfig !== "object") return fallback;
+  const categories = Array.isArray(rawConfig.categories) ? rawConfig.categories : fallback.categories;
+  return {
+    version: Number(rawConfig.version ?? fallback.version) || fallback.version,
+    categories
+  };
+}
+
+function normalizeReferenceKeywordPattern(keyword) {
+  return String(keyword ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+}
+
+function normalizeReferenceLibraryEntry(entry = {}) {
+  const id = String(entry.id ?? "").trim().toLowerCase();
+  if (!id) return null;
+  const enabled = entry.enabled !== false;
+  const keywords = Array.isArray(entry.keywords)
+    ? entry.keywords.map(normalizeReferenceKeywordPattern).filter((value) => value.length > 0)
+    : [];
+  if (!keywords.length) return null;
+  const referenceImagePath = String(entry.referenceImagePath ?? "").trim();
+  const referenceInstruction = String(entry.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim() || REFERENCE_GUIDANCE_SUFFIX;
+  return {
+    id,
+    enabled,
+    keywords,
+    referenceImagePath,
+    referenceInstruction
+  };
+}
+
+function getReferenceLibraryEntries() {
+  const config = getReferenceLibraryConfig();
+  const categories = Array.isArray(config?.categories) ? config.categories : [];
+  const normalized = categories
+    .map((category) => normalizeReferenceLibraryEntry(category))
+    .filter((category) => category && category.enabled);
+  return normalized;
+}
+
+function detectReferenceCategoryFromPrompt(prompt) {
+  const source = String(prompt ?? "").trim().toLowerCase();
+  if (!source) return null;
+  for (const category of getReferenceLibraryEntries()) {
+    for (const keywordPattern of category.keywords) {
+      const matcher = new RegExp(`(^|[^a-z0-9])${keywordPattern}([^a-z0-9]|$)`, "i");
+      if (matcher.test(source)) {
+        return {
+          categoryId: category.id,
+          matchedKeyword: keywordPattern.replace(/\\s\+/g, " ").replace(/\\/g, ""),
+          referenceInstruction: category.referenceInstruction,
+          referenceImagePath: category.referenceImagePath
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function buildReferenceImageUrl(referenceImagePath) {
+  const normalizedPath = String(referenceImagePath ?? "").trim();
+  if (!normalizedPath) return "";
+  if (/^https?:\/\//i.test(normalizedPath)) return normalizedPath;
+  const backendBaseUrl = getSubscriptionBackendUrl();
+  if (!backendBaseUrl) return "";
+  return `${backendBaseUrl}${normalizedPath.startsWith("/") ? "" : "/"}${normalizedPath}`;
+}
+
+function resolveGenerationReferenceContext(prompt) {
+  const detection = detectReferenceCategoryFromPrompt(prompt);
+  if (!detection) return null;
+  return {
+    categoryId: detection.categoryId,
+    matchedKeyword: detection.matchedKeyword,
+    referenceInstruction: detection.referenceInstruction,
+    referenceImagePath: detection.referenceImagePath,
+    referenceImageUrl: buildReferenceImageUrl(detection.referenceImagePath)
+  };
 }
 
 function shouldAutoActivateGeneratedScene() {
@@ -2791,10 +2906,18 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
   }
 
   const compiledPrompt = generationData.compiledImagePrompt ?? "";
+  const referenceContext = resolveGenerationReferenceContext(generationData?.prompt ?? "");
+  if (referenceContext) {
+    console.info(`${MODULE_ID} | Generation reference selected`, {
+      categoryId: referenceContext.categoryId,
+      matchedKeyword: referenceContext.matchedKeyword
+    });
+  }
   const imageResult = await generateAiMapImage(compiledPrompt, {
     seed: generationData.seed,
     imageSize: generationData.imageSize ?? getRequestedImageSize(generationData.sceneSizeKey, generationData.imageOrientation),
-    imageOrientation: generationData.imageOrientation ?? "landscape"
+    imageOrientation: generationData.imageOrientation ?? "landscape",
+    referenceContext
   });
   debugLog("AI imageResult", imageResult);
 
@@ -2840,7 +2963,8 @@ async function createMockAiSceneFromGenerationData(generationData, seedWasAutoGe
     imageStatus: imageResult.imageStatus,
     imagePath: imageResult.imagePath,
     costEstimate: imageResult.costEstimate,
-    generationMetadata: imageResult.generationMetadata ?? null
+    generationMetadata: imageResult.generationMetadata ?? null,
+    referenceCategory: referenceContext?.categoryId ?? null
   };
 
   if (imageResult?.provider === "subscription" && imageResult?.generationMetadata) {
@@ -3339,10 +3463,23 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   const requestType = String(options.requestType ?? "text-to-image").trim().toLowerCase();
   const isImageEditRequest = requestType === "image-edit";
+  const referenceContext = !isImageEditRequest ? (options.referenceContext ?? null) : null;
+  const effectivePrompt = referenceContext
+    ? `${String(compiledPrompt ?? "").trim()}\n${String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim()}`
+    : String(compiledPrompt ?? "").trim();
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
   const requestPayload = isImageEditRequest
     ? buildImageEditRequestPayload(compiledPrompt, options)
-    : buildTextToImageRequestPayload(compiledPrompt, options);
+    : buildTextToImageRequestPayload(effectivePrompt, {
+      ...options,
+      referenceContext
+    });
+  if (referenceContext) {
+    console.info(`${MODULE_ID} | Reference-guided generation payload enabled`, {
+      referenceCategory: referenceContext.categoryId,
+      hasReferenceImageUrl: Boolean(referenceContext.referenceImageUrl)
+    });
+  }
   logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
 
   try {
@@ -3481,7 +3618,10 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       imageStatus: "complete",
       imagePath: String(imagePath),
       costEstimate,
-      generationMetadata
+      generationMetadata: {
+        ...(generationMetadata ?? {}),
+        referenceCategory: referenceContext?.categoryId ?? null
+      }
     };
   } catch (error) {
     const refundResult = await attemptRefundWithContract({

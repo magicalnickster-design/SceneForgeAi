@@ -238,6 +238,23 @@ test("normal text-to-image payload contains no image-input fields", () => {
   assert.equal(transactionApi.buildGeneratePayloadSummary(payload, { idempotencyKey: "idem-foo-1234" }).hasImageInputField, false);
 });
 
+test("reference-guided text-to-image payload includes reference fields", () => {
+  const payload = transactionApi.buildTextToImagePayload({
+    prompt: "A medieval tavern interior with a large bar and fireplace",
+    size: "1536x1024",
+    orientation: "landscape",
+    width: 1536,
+    height: 1024,
+    reference_category: "tavern",
+    reference_image_url: "https://sceneforge-backend.onrender.com/api/maps/references/tavern",
+    reference_instruction: "Use the supplied reference image as layout guidance while creating a new original map."
+  });
+  assert.equal(payload.reference_category, "tavern");
+  assert.equal(payload.reference_image_url, "https://sceneforge-backend.onrender.com/api/maps/references/tavern");
+  assert.match(payload.reference_instruction, /layout guidance/i);
+  assert.equal(transactionApi.detectImageInputFields(payload).length, 0);
+});
+
 test("empty image/input fields are omitted from payload", () => {
   const payload = transactionApi.buildTextToImagePayload({
     prompt: "A dungeon",
