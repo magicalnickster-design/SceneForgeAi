@@ -3504,7 +3504,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
     ? `${String(compiledPrompt ?? "").trim()}\n${String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim()}`
     : String(compiledPrompt ?? "").trim();
   console.info(`${MODULE_ID} | Subscription backend endpoint: ${endpoint}`);
-  const requestPayload = isImageEditRequest
+  let requestPayload = isImageEditRequest
     ? buildImageEditRequestPayload(compiledPrompt, options)
     : buildTextToImageRequestPayload(effectivePrompt, {
       ...options,
@@ -3519,16 +3519,44 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
 
   try {
-    const response = await authFetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": idempotencyKey
-      },
-      body: JSON.stringify(requestPayload)
-    });
-
-    const payload = await response.json().catch(() => ({}));
+    let response = null;
+    let payload = {};
+    let activeReferenceContext = referenceContext;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await authFetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey
+        },
+        body: JSON.stringify(requestPayload)
+      });
+      payload = await response.json().catch(() => ({}));
+      if (response.ok) break;
+      const backendReasonCode = String(payload?.reason ?? payload?.errorCode ?? payload?.code ?? "").toLowerCase();
+      const backendDetailText = String(payload?.detail ?? payload?.message ?? "").toLowerCase();
+      const shouldFallbackToNormalGeneration = (
+        !isImageEditRequest
+        && Boolean(activeReferenceContext)
+        && attempt === 0
+        && (
+          backendReasonCode === "reference_image_unavailable"
+          || (backendDetailText.includes("reference image") && backendDetailText.includes("not configured"))
+        )
+      );
+      if (shouldFallbackToNormalGeneration) {
+        logImagePipelineError("reference generation unavailable from backend, retrying without reference", {
+          referenceCategory: activeReferenceContext?.categoryId ?? null,
+          status: response.status,
+          reason: payload?.reason ?? null
+        });
+        activeReferenceContext = null;
+        requestPayload = buildTextToImageRequestPayload(String(compiledPrompt ?? "").trim(), options);
+        logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
+        continue;
+      }
+      break;
+    }
     if (!response.ok) {
       await attemptRefundWithContract({
         idempotencyKey,
@@ -3656,7 +3684,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       costEstimate,
       generationMetadata: {
         ...(generationMetadata ?? {}),
-        referenceCategory: referenceContext?.categoryId ?? null
+        referenceCategory: activeReferenceContext?.categoryId ?? null
       }
     };
   } catch (error) {
