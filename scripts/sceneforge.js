@@ -3363,6 +3363,26 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const costEstimate = { preview: "included with subscription", final: "included with subscription" };
   const backendBaseUrl = getSubscriptionBackendUrl();
   const authFetch = getAuthApi()?.authenticatedFetch ?? fetch;
+  const ensureReachableReferenceContext = async (context) => {
+    if (!context) return null;
+    const referenceImageUrl = String(context?.referenceImageUrl ?? "").trim();
+    if (!referenceImageUrl) return null;
+    const probeReference = async (method) => {
+      const response = await authFetch(referenceImageUrl, { method });
+      return response.ok;
+    };
+    try {
+      if (await probeReference("HEAD")) return context;
+    } catch (_headError) {
+      // Some hosts do not support HEAD consistently; fallback to GET probe.
+    }
+    try {
+      if (await probeReference("GET")) return context;
+    } catch (_getError) {
+      // Unreachable reference image; fallback to normal generation path.
+    }
+    return null;
+  };
   debugLog("SceneForge backendBaseUrl:", backendBaseUrl);
   const token = getSubscriptionAuthToken();
 
@@ -3463,7 +3483,17 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const endpoint = `${backendBaseUrl}/api/maps/generate`;
   const requestType = String(options.requestType ?? "text-to-image").trim().toLowerCase();
   const isImageEditRequest = requestType === "image-edit";
-  const referenceContext = !isImageEditRequest ? (options.referenceContext ?? null) : null;
+  let referenceContext = !isImageEditRequest ? (options.referenceContext ?? null) : null;
+  if (referenceContext) {
+    const reachableReferenceContext = await ensureReachableReferenceContext(referenceContext);
+    if (!reachableReferenceContext) {
+      logImagePipelineError("reference image unavailable, falling back to normal generation", {
+        referenceCategory: referenceContext?.categoryId ?? null,
+        referenceImageUrl: referenceContext?.referenceImageUrl ?? null
+      });
+      referenceContext = null;
+    }
+  }
   const effectivePrompt = referenceContext
     ? `${String(compiledPrompt ?? "").trim()}\n${String(referenceContext.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim()}`
     : String(compiledPrompt ?? "").trim();
