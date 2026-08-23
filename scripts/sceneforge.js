@@ -651,12 +651,23 @@ const INTERIOR_LAYOUT_HARD_REQUIREMENTS = [
   "EACH BUILDING MUST HAVE EXACTLY ONE EXTERIOR FRONT DOOR ENTRANCE",
   "DO NOT ADD MULTIPLE EXTERIOR ENTRANCES TO THE SAME BUILDING"
 ];
+const TAVERN_KEYWORD_PATTERN = /\b(tavern|inn|pub|alehouse|taproom)\b/i;
+const TAVERN_INTERIOR_HARD_REQUIREMENTS = [
+  "IF THE PROMPT DESCRIBES A TAVERN/INN/PUB/ALEHOUSE/TAPROOM INTERIOR, INCLUDE A CLEAR MAIN COMMON ROOM",
+  "THE MAIN COMMON ROOM MUST INCLUDE MULTIPLE TABLES WITH CHAIRS OR STOOLS ARRANGED FOR GUEST SEATING",
+  "INCLUDE A DISTINCT BAR OR SERVING COUNTER AREA APPROPRIATE FOR A FANTASY TAVERN",
+  "INCLUDE A SEPARATE SERVICE OR STORAGE AREA FOR TAVERN OPERATIONS WITHOUT MIXING BEDS INTO BULK STORAGE"
+];
 const REFERENCE_GUIDANCE_SUFFIX = [
   "Use the supplied reference image as guidance for architectural logic, interior layout quality, furniture scale, room proportions, and true top-down battle-map composition.",
   "Create a new original environment based on the user's requested description.",
   "Do not recreate or copy the exact reference layout.",
   ...INTERIOR_LAYOUT_HARD_REQUIREMENTS
 ].join(" ");
+
+function isTavernLikePrompt(prompt) {
+  return TAVERN_KEYWORD_PATTERN.test(String(prompt ?? ""));
+}
 const DEFAULT_REFERENCE_LIBRARY_CONFIG = {
   version: 1,
   categories: [
@@ -5725,6 +5736,9 @@ function compileInkarnatePrompt(prompt, options = {}) {
   const interiorSpecificLines = buildingViewMode === "roofs-no-interior"
     ? []
     : INTERIOR_LAYOUT_HARD_REQUIREMENTS;
+  const tavernSpecificLines = (buildingViewMode === "roofs-no-interior" || !isTavernLikePrompt(sourcePrompt))
+    ? []
+    : TAVERN_INTERIOR_HARD_REQUIREMENTS;
   const lines = [
     sourcePrompt,
     "TRUE TOP DOWN BATTLE MAP",
@@ -5741,6 +5755,7 @@ function compileInkarnatePrompt(prompt, options = {}) {
     buildingViewLine,
     ...spatialIntegrityLines,
     ...interiorSpecificLines,
+    ...tavernSpecificLines,
     "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
     "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
     "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",
