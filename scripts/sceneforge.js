@@ -3010,6 +3010,34 @@ async function editAiMapImage(referenceImagePath, editPrompt, options = {}) {
   };
 }
 
+function compileSceneImageEditPrompt(scene, editPrompt) {
+  const normalizedPrompt = String(editPrompt ?? "").trim();
+  if (!normalizedPrompt) return "";
+  const generationData = scene?.getFlag?.(MODULE_ID, FLAG_GENERATION_KEY) ?? {};
+  const sceneSizeKey = String(generationData?.sceneSizeKey ?? "medium").trim().toLowerCase() || "medium";
+  const sceneWidth = Number(scene?.width ?? 0);
+  const sceneHeight = Number(scene?.height ?? 0);
+  const fallbackOrientation = sceneWidth > 0 && sceneHeight > 0
+    ? (sceneWidth === sceneHeight ? "square" : (sceneWidth > sceneHeight ? "landscape" : "portrait"))
+    : "landscape";
+  const imageOrientation = String(generationData?.imageOrientation ?? fallbackOrientation).trim().toLowerCase() || fallbackOrientation;
+  const mapCoverageMeters = Number(generationData?.mapCoverageMeters ?? getMapCoverageMeters(sceneSizeKey));
+  const buildingViewMode = String(generationData?.buildingViewMode ?? "interior").trim().toLowerCase() || "interior";
+  const compiledBasePrompt = compileInkarnatePrompt(normalizedPrompt, {
+    imageOrientation,
+    sceneSizeKey,
+    mapCoverageMeters,
+    buildingViewMode
+  });
+  const styleContinuityLines = [
+    "IMAGE-EDIT MODE: MODIFY ONLY THE PROVIDED REFERENCE MAP",
+    "PRESERVE THE EXISTING HAND-PAINTED INKARNATE STYLE, LINE WEIGHT, SHADING, TEXTURE LANGUAGE, AND COLOR PALETTE",
+    "KEEP THE SAME TOP-DOWN CAMERA, SCALE, VISUAL MATERIALS, AND RENDERING STYLE AS THE ORIGINAL MAP",
+    "DO NOT INTRODUCE INTERIOR MESH OVERLAYS, MIXED STYLES, OR CUTAWAY ARTIFACTS"
+  ];
+  return [compiledBasePrompt, ...styleContinuityLines].join("\n");
+}
+
 async function handleSceneImageEdit(scene, editConfig) {
   const originalBackgroundPath = getSceneBackgroundPath(scene);
   if (!originalBackgroundPath) {
@@ -3025,7 +3053,8 @@ async function handleSceneImageEdit(scene, editConfig) {
     ui.notifications.warn("SceneForge AI: Please enter map edit instructions.");
     return false;
   }
-  const result = await editAiMapImage(originalBackgroundPath, editPrompt, {
+  const compiledEditPrompt = compileSceneImageEditPrompt(scene, editPrompt);
+  const result = await editAiMapImage(originalBackgroundPath, compiledEditPrompt, {
     width: Number(scene?.width ?? 0) || undefined,
     height: Number(scene?.height ?? 0) || undefined
   });
@@ -3066,7 +3095,7 @@ async function handleSceneImageEdit(scene, editConfig) {
           ...(generationData?.imageGeneration ?? {}),
           ...(result?.generationMetadata ?? {}),
           provider: result?.provider ?? generationData?.imageGeneration?.provider ?? "subscription",
-          compiledPrompt: editPrompt,
+          compiledPrompt: compiledEditPrompt,
           imageStatus: result?.imageStatus ?? "complete",
           imagePath: persistedPath
         },
@@ -3076,7 +3105,7 @@ async function handleSceneImageEdit(scene, editConfig) {
     await scene.setFlag(MODULE_ID, FLAG_IMAGE_GENERATION_KEY, {
       ...(result?.generationMetadata ?? {}),
       provider: result?.provider ?? "subscription",
-      compiledPrompt: editPrompt,
+      compiledPrompt: compiledEditPrompt,
       imageStatus: result?.imageStatus ?? "complete",
       imagePath: persistedPath
     });
