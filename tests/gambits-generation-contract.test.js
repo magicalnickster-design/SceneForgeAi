@@ -246,11 +246,10 @@ test("reference-guided text-to-image payload includes reference fields", () => {
     width: 1536,
     height: 1024,
     reference_category: "tavern",
-    reference_image_url: "https://sceneforge-backend.onrender.com/api/maps/references/tavern",
     reference_instruction: "Use the supplied reference image as layout guidance while creating a new original map."
   });
   assert.equal(payload.reference_category, "tavern");
-  assert.equal(payload.reference_image_url, "https://sceneforge-backend.onrender.com/api/maps/references/tavern");
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "reference_image_url"), false);
   assert.match(payload.reference_instruction, /layout guidance/i);
   assert.equal(transactionApi.detectImageInputFields(payload).length, 0);
 });

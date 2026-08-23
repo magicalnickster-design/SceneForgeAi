@@ -650,6 +650,7 @@ const DEFAULT_REFERENCE_LIBRARY_CONFIG = {
       id: "tavern",
       enabled: true,
       keywords: ["tavern", "inn", "pub", "alehouse", "taproom"],
+      backendManaged: true,
       referenceImagePath: "/api/maps/references/tavern",
       referenceInstruction: REFERENCE_GUIDANCE_SUFFIX
     }
@@ -1291,9 +1292,11 @@ function normalizeReferenceLibraryEntry(entry = {}) {
   if (!keywords.length) return null;
   const referenceImagePath = String(entry.referenceImagePath ?? "").trim();
   const referenceInstruction = String(entry.referenceInstruction ?? REFERENCE_GUIDANCE_SUFFIX).trim() || REFERENCE_GUIDANCE_SUFFIX;
+  const backendManaged = entry.backendManaged !== false;
   return {
     id,
     enabled,
+    backendManaged,
     keywords,
     referenceImagePath,
     referenceInstruction
@@ -1340,12 +1343,15 @@ function buildReferenceImageUrl(referenceImagePath) {
 function resolveGenerationReferenceContext(prompt) {
   const detection = detectReferenceCategoryFromPrompt(prompt);
   if (!detection) return null;
+  const matchedEntry = getReferenceLibraryEntries().find((entry) => entry.id === detection.categoryId) ?? null;
+  const backendManaged = matchedEntry?.backendManaged !== false;
   return {
     categoryId: detection.categoryId,
     matchedKeyword: detection.matchedKeyword,
     referenceInstruction: detection.referenceInstruction,
     referenceImagePath: detection.referenceImagePath,
-    referenceImageUrl: buildReferenceImageUrl(detection.referenceImagePath)
+    backendManaged,
+    referenceImageUrl: backendManaged ? "" : buildReferenceImageUrl(detection.referenceImagePath)
   };
 }
 
@@ -3366,7 +3372,7 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
   const ensureReachableReferenceContext = async (context) => {
     if (!context) return null;
     const referenceImageUrl = String(context?.referenceImageUrl ?? "").trim();
-    if (!referenceImageUrl) return null;
+    if (!referenceImageUrl) return context;
     const probeReference = async (method) => {
       const response = await authFetch(referenceImageUrl, { method });
       return response.ok;
