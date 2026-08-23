@@ -3551,7 +3551,10 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
           reason: payload?.reason ?? null
         });
         activeReferenceContext = null;
-        requestPayload = buildTextToImageRequestPayload(String(compiledPrompt ?? "").trim(), options);
+        requestPayload = buildTextToImageRequestPayload(String(compiledPrompt ?? "").trim(), {
+          ...options,
+          referenceContext: null
+        });
         logGeneratePayloadDiagnostics(requestPayload, idempotencyKey);
         continue;
       }
