@@ -409,7 +409,14 @@ async function persistEditedSceneBackground(imageData, options = {}) {
 }
 
 function getStoredSceneOriginalPrompt(scene) {
-  return String(scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT) ?? "").trim();
+  const fromOriginalPromptFlag = String(scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT) ?? "").trim();
+  if (fromOriginalPromptFlag) return fromOriginalPromptFlag;
+  const generationData = scene?.getFlag?.(MODULE_ID, FLAG_GENERATION_KEY);
+  const fromGenerationPrompt = String(generationData?.prompt ?? "").trim();
+  if (fromGenerationPrompt) return fromGenerationPrompt;
+  const fromCompiledPrompt = String(generationData?.imageGeneration?.compiledPrompt ?? "").trim();
+  if (fromCompiledPrompt) return fromCompiledPrompt;
+  return "";
 }
 
 async function setStoredSceneOriginalPrompt(scene, prompt) {
@@ -3042,6 +3049,10 @@ async function openSceneImageEditDialog(scene) {
     return;
   }
   const storedPrompt = getStoredSceneOriginalPrompt(scene);
+  if (storedPrompt && !scene?.getFlag(MODULE_ID, FLAG_ORIGINAL_PROMPT)) {
+    // One-time migration for older generated scenes: recover prompt from existing generation metadata.
+    await setStoredSceneOriginalPrompt(scene, storedPrompt);
+  }
   const content = `
 <form class="sceneforge-form sceneforge-generate-form sceneforge-edit-map-form">
   <div class="sceneforge-field sceneforge-edit-map-preview">
