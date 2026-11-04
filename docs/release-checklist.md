@@ -10,6 +10,7 @@ Use this checklist each time you publish a new module version.
   - [ ] `title`
   - [ ] `compatibility.minimum`
   - [ ] `compatibility.verified`
+  - [ ] `compatibility.maximum`
   - [ ] `url`
   - [ ] `manifest`
   - [ ] `download`
@@ -36,6 +37,7 @@ Use this checklist each time you publish a new module version.
   - [ ] Release Notes URL = GitHub release page URL
   - [ ] Required Core Version = matches `compatibility.minimum`
   - [ ] Compatible Core Version = matches `compatibility.verified`
+  - [ ] Maximum Core Version = matches `compatibility.maximum` (if set)
 - [ ] Publish the Foundry release.
 
 ## 4) Publish/update on The Forge (Bazaar)
