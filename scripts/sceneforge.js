@@ -488,6 +488,10 @@ const THEME_LABELS = {
   "forest-ruins": "Forest Ruins",
   dungeon: "Dungeon"
 };
+const MAP_STYLE_LABELS = {
+  fantasy: "Fantasy",
+  scifi: "Sci-Fi"
+};
 
 const LIGHTING_MOOD_LABELS = {
   bright: "Bright",
@@ -2351,6 +2355,7 @@ async function openGeneratorDialog(initialState = null) {
   const dialog = new Dialog({
     title: "SceneForge AI - Generate Map",
     content,
+    classes: ["sceneforge-generator-dialog"],
     buttons: {
       generate: {
         icon: '<i class="fas fa-wand-magic-sparkles"></i>',
@@ -2366,6 +2371,10 @@ async function openGeneratorDialog(initialState = null) {
     },
     default: "generate",
     render: (dialogHtml) => {
+      const dialogWindow = dialogHtml?.closest?.(".app.window-app");
+      if (dialogWindow?.length) {
+        dialogWindow.addClass("sceneforge-generator-dialog");
+      }
       wireAutoDetectUi(dialogHtml, initialState);
     }
   });
@@ -2390,6 +2399,7 @@ function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
+  if (typeof state.mapStyle === "string") form.find('[name="mapStyle"]').val(state.mapStyle);
   if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
   if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
 }
@@ -2442,6 +2452,7 @@ async function handleGenerate(dialogHtml) {
 function buildGenerationConfigFromForm(form) {
   const generationMode = "ai-image-only";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
+  const mapStyle = String(form.find('[name="mapStyle"]').val() ?? "fantasy").trim().toLowerCase();
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
   const orientationSpec = getImageOrientationSpec(imageOrientation);
@@ -2459,6 +2470,7 @@ function buildGenerationConfigFromForm(form) {
 
   const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
   const compiledImagePrompt = compileInkarnatePrompt(prompt, {
+    mapStyle,
     imageOrientation,
     sceneSizeKey,
     mapCoverageMeters
@@ -2467,6 +2479,7 @@ function buildGenerationConfigFromForm(form) {
   const generationData = {
     generationMode,
     prompt,
+    mapStyle,
     sceneSizeKey,
     imageOrientation,
     imageSize: requestedImageSize,
@@ -2498,6 +2511,7 @@ function buildGenerationConfigFromForm(form) {
   const formState = {
     prompt,
     seed,
+    mapStyle,
     mapScale: sceneSizeKey,
     imageOrientation
   };
@@ -2576,6 +2590,7 @@ function buildGenerationPreviewData(config) {
   return {
     generationMode: generationData.generationMode ?? "ai-image-only",
     finalTheme: generationData.theme,
+    mapStyle: generationData.mapStyle ?? "fantasy",
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
     imageOrientation: generationData.imageOrientation ?? "landscape",
@@ -2687,6 +2702,7 @@ async function openGenerationPreviewDialog(config, previewData) {
 <div class="sceneforge-preview">
   <p><strong>Generation Mode:</strong> AI Planner Mode</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
+  <p><strong>Map Style:</strong> ${foundry.utils.escapeHTML(MAP_STYLE_LABELS[previewData.mapStyle] ?? MAP_STYLE_LABELS.fantasy)}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
   <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[previewData.lightingMood] ?? "Dim")}</p>
@@ -5499,13 +5515,32 @@ function buildSpatialLogicConstraintLines(sourcePrompt) {
   return lines;
 }
 
+function buildMapStylePrefixLines(mapStyle) {
+  const normalized = String(mapStyle ?? "fantasy").trim().toLowerCase();
+  if (normalized === "scifi") {
+    return [
+      "SCI-FI BATTLE MAP STYLE",
+      "FUTURISTIC FACILITY OR STARFARING ARCHITECTURE WITH CLEAN HARD-SURFACE DESIGN",
+      "SCI-FI PROP LANGUAGE: CONSOLES, BULKHEADS, ADVANCED MATERIALS, INDUSTRIAL OR HIGH-TECH INTERIORS",
+      "NO MEDIEVAL FANTASY THEMES, NO CASTLE OR TAVERN VISUAL LANGUAGE"
+    ];
+  }
+  return [
+    "FANTASY BATTLE MAP STYLE",
+    "MEDIEVAL OR HIGH-FANTASY ARCHITECTURE, MATERIALS, AND PROP LANGUAGE",
+    "NO MODERN OR SCI-FI TECHNOLOGY, NO FUTURISTIC MACHINERY OR INTERFACES"
+  ];
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
+  const mapStylePrefixLines = buildMapStylePrefixLines(options.mapStyle);
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
   const spatialLogicLines = buildSpatialLogicConstraintLines(sourcePrompt);
   const lines = [
     sourcePrompt,
+    ...mapStylePrefixLines,
     ...spatialLogicLines,
     "TRUE TOP DOWN BATTLE MAP",
     "90 DEGREE ORTHOGRAPHIC CAMERA",
