@@ -551,6 +551,10 @@ const THEME_LABELS = {
   "forest-ruins": "Forest Ruins",
   dungeon: "Dungeon"
 };
+const MAP_STYLE_LABELS = {
+  fantasy: "Fantasy",
+  scifi: "Sci-Fi"
+};
 
 const LIGHTING_MOOD_LABELS = {
   bright: "Bright",
@@ -1754,14 +1758,16 @@ async function markImageDumpEntryUsed(entryId, scene) {
 async function voteOnSceneMap(scene, voteValue) {
   const entryId = scene?.getFlag(MODULE_ID, FLAG_IMAGE_DUMP_ENTRY_ID);
   if (!entryId) {
-    ui.notifications.warn("SceneForge AI: No image dump entry found for this scene.");
     return;
   }
   const userId = game.user?.id;
   if (!userId) return;
 
   if (!canUseGlobalImageDumpLibrary()) {
-    ui.notifications.error("SceneForge AI: Global vote service is required.");
+    logImagePipelineError("global vote skipped (global library unavailable)", {
+      sceneId: scene?.id ?? null,
+      vote: Number(voteValue)
+    });
     return;
   }
 
@@ -1773,11 +1779,14 @@ async function voteOnSceneMap(scene, voteValue) {
     }
   });
   if (response.ok) {
-    ui.notifications.info(`SceneForge AI: Vote saved globally (${Number(voteValue) === 1 ? "Liked" : "Disliked"}).`);
     return;
   }
 
-  ui.notifications.error(`SceneForge AI: Global vote failed (${response.status || "network"}).`);
+  logImagePipelineError("global vote failed", {
+    entryId,
+    vote: Number(voteValue),
+    status: response.status || "network"
+  });
 }
 
 async function promptForGeneratedSceneVote(scene) {
@@ -2379,6 +2388,7 @@ function applyGeneratorFormState(form, state) {
   if (!state || typeof state !== "object") return;
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
+  if (typeof state.mapStyle === "string") form.find('[name="mapStyle"]').val(state.mapStyle);
   if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
   if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
   if (typeof state.buildingViewMode === "string") form.find('[name="buildingViewMode"]').val(state.buildingViewMode);
@@ -2436,6 +2446,7 @@ async function handleGenerate(dialogHtml, options = {}) {
 function buildGenerationConfigFromForm(form) {
   const generationMode = "ai-image-only";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
+  const mapStyle = String(form.find('[name="mapStyle"]').val() ?? "fantasy").trim().toLowerCase();
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
   const buildingViewMode = String(form.find('[name="buildingViewMode"]').val() ?? "interior").trim().toLowerCase();
@@ -2454,6 +2465,7 @@ function buildGenerationConfigFromForm(form) {
 
   const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
   const compiledImagePrompt = compileInkarnatePrompt(prompt, {
+    mapStyle,
     imageOrientation,
     sceneSizeKey,
     mapCoverageMeters,
@@ -2463,6 +2475,7 @@ function buildGenerationConfigFromForm(form) {
   const generationData = {
     generationMode,
     prompt,
+    mapStyle,
     sceneSizeKey,
     imageOrientation,
     buildingViewMode,
@@ -2495,6 +2508,7 @@ function buildGenerationConfigFromForm(form) {
   const formState = {
     prompt,
     seed,
+    mapStyle,
     mapScale: sceneSizeKey,
     imageOrientation,
     buildingViewMode
@@ -2571,6 +2585,7 @@ function buildGenerationPreviewData(config) {
   return {
     generationMode: generationData.generationMode ?? "ai-image-only",
     finalTheme: generationData.theme,
+    mapStyle: generationData.mapStyle ?? "fantasy",
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
     imageOrientation: generationData.imageOrientation ?? "landscape",
@@ -2682,6 +2697,7 @@ async function openGenerationPreviewDialog(config, previewData) {
 <div class="sceneforge-preview">
   <p><strong>Generation Mode:</strong> AI Planner Mode</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
+  <p><strong>Map Style:</strong> ${foundry.utils.escapeHTML(MAP_STYLE_LABELS[previewData.mapStyle] ?? MAP_STYLE_LABELS.fantasy)}</p>
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
   <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[previewData.lightingMood] ?? "Dim")}</p>
@@ -3743,11 +3759,17 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
         .filter((part, index, arr) => part && arr.indexOf(part) === index)
         .join(" - ");
       const quotaErrorCode = String(payload?.errorCode ?? payload?.code ?? payload?.error ?? "").toLowerCase();
-      if (quotaErrorCode === "quota_exceeded") {
+      const isQuotaExceeded =
+        quotaErrorCode === "quota_exceeded"
+        || quotaErrorCode.includes("quota")
+        || quotaErrorCode.includes("limit")
+        || response.status === 429;
+      if (isQuotaExceeded) {
         const monthKey = String(payload?.monthKey ?? payload?.usage?.monthKey ?? subscriptionState?.monthKey ?? "").trim();
         const usageLimit = Number(payload?.usageLimit ?? payload?.usage?.limit ?? subscriptionState?.usageLimit ?? 0);
         const usageCount = Number(payload?.usageCount ?? payload?.usage?.used ?? subscriptionState?.usageCount ?? usageLimit);
         const monthLabel = monthKey || "this month";
+        void syncDiscordSubscriptionStatus({ notify: false });
         return {
           provider,
           imageStatus: "failed",
@@ -3837,7 +3859,6 @@ async function generateSubscriptionMapImage(compiledPrompt, options = {}) {
       }
     }
     await syncSubscriptionStatus({ notify: false });
-
     return {
       provider,
       imageStatus: "complete",
@@ -4442,25 +4463,6 @@ function buildKeywordRanges(prompt, keywords, className) {
   }
 
   return ranges;
-}
-
-/**
- * Regenerate a scene from previously saved scene flags.
- */
-async function regenerateSceneFromFlags(scene) {
-  const generationData = scene.getFlag(MODULE_ID, FLAG_GENERATION_KEY);
-  if (!generationData) {
-    ui.notifications.warn("SceneForge AI: This scene has no saved generation data.");
-    return;
-  }
-
-  try {
-    await generateSceneLayout(scene, generationData, { isRegeneration: true });
-    ui.notifications.info(`SceneForge AI: Cleared SceneForge-generated overlays for "${scene.name}".`);
-  } catch (error) {
-    console.error(`${MODULE_ID} | Scene regeneration failed`, error);
-    ui.notifications.error("SceneForge AI: Failed to regenerate layout. Check browser console.");
-  }
 }
 
 /**
@@ -5751,10 +5753,76 @@ function formatMapScalePromptInstruction(sceneSizeKey, mapCoverageMeters) {
   ];
 }
 
+function parsePromptCountToken(value) {
+  const token = String(value ?? "").trim().toLowerCase();
+  if (!token) return null;
+  if (/^\d+$/.test(token)) return Number(token);
+  const words = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6
+  };
+  return words[token] ?? null;
+}
+
+function buildSpatialLogicConstraintLines(sourcePrompt) {
+  const text = String(sourcePrompt ?? "").trim().toLowerCase();
+  if (!text) return [];
+
+  const lines = [
+    "STRICTLY FOLLOW THE USER'S SPATIAL LOGIC, COUNTS, AND ACCESS RULES",
+    "ALL MAJOR ROOMS AND CORRIDORS MUST BE CLEARLY CONNECTED AND TRAVERSABLE",
+    "DO NOT ADD EXTRA EXITS, EXTRA MAIN PATHS, OR UNREQUESTED MAJOR ROOMS"
+  ];
+
+  const pathCountMatch = text.match(/\b(one|two|three|four|five|six|\d+)\s+(?:main\s+)?paths?\b/);
+  const pathCount = parsePromptCountToken(pathCountMatch?.[1]);
+  if (Number.isFinite(pathCount) && pathCount > 0) {
+    lines.push(`EXACTLY ${pathCount} DISTINCT MAIN PATHS OR ROUTES`);
+  }
+
+  if (/\bonly\s+the\s+left\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE LEFTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+right\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE RIGHTMOST PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  } else if (/\bonly\s+the\s+(middle|center|centre)\b/.test(text) && /\bexit\b/.test(text)) {
+    lines.push("THE CENTER PATH MUST BE THE ONLY ROUTE THAT REACHES THE EXIT");
+  }
+
+  const mentionsTreasure = /\btreasure|loot|artifact|artifacts|cache\b/.test(text);
+  if (mentionsTreasure && /\b(other|remaining)\s+(two|2|three|3)\b/.test(text)) {
+    lines.push("THE NON-EXIT PATHS SHOULD TERMINATE IN LOOT OR ARTIFACT ROOMS, NOT ADDITIONAL EXITS");
+  }
+
+  return lines;
+}
+
+function buildMapStylePrefixLines(mapStyle) {
+  const normalized = String(mapStyle ?? "fantasy").trim().toLowerCase();
+  if (normalized === "scifi") {
+    return [
+      "SCI-FI BATTLE MAP STYLE",
+      "FUTURISTIC FACILITY OR STARFARING ARCHITECTURE WITH CLEAN HARD-SURFACE DESIGN",
+      "SCI-FI PROP LANGUAGE: CONSOLES, BULKHEADS, ADVANCED MATERIALS, INDUSTRIAL OR HIGH-TECH INTERIORS",
+      "NO MEDIEVAL FANTASY THEMES, NO CASTLE OR TAVERN VISUAL LANGUAGE"
+    ];
+  }
+  return [
+    "FANTASY BATTLE MAP STYLE",
+    "MEDIEVAL OR HIGH-FANTASY ARCHITECTURE, MATERIALS, AND PROP LANGUAGE",
+    "NO MODERN OR SCI-FI TECHNOLOGY, NO FUTURISTIC MACHINERY OR INTERFACES"
+  ];
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
+  const mapStylePrefixLines = buildMapStylePrefixLines(options.mapStyle);
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
+  const spatialLogicLines = buildSpatialLogicConstraintLines(sourcePrompt);
   const buildingViewMode = String(options.buildingViewMode ?? "interior").trim().toLowerCase();
   const buildingViewLine = buildingViewMode === "roofs-no-interior"
     ? "BUILDINGS MUST SHOW ROOFS ONLY; DO NOT SHOW INTERIOR ROOMS, INTERIOR WALLS, OR INTERIOR FURNITURE"
@@ -5777,6 +5845,8 @@ function compileInkarnatePrompt(prompt, options = {}) {
     : TAVERN_INTERIOR_HARD_REQUIREMENTS;
   const lines = [
     sourcePrompt,
+    ...mapStylePrefixLines,
+    ...spatialLogicLines,
     "TRUE TOP DOWN BATTLE MAP",
     "HARD REQUIREMENTS: DO NOT VIOLATE PLAN-VIEW OR SPATIAL-LOGIC RULES",
     "90 DEGREE ORTHOGRAPHIC CAMERA",

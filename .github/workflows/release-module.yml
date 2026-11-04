@@ -1,0 +1,95 @@
+name: release-module
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MODULE_ZIP_NAME: sceneforge-ai.zip
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build release manifest and package zip
+        id: build
+        env:
+          REPO: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          module_path = Path("module.json")
+          module = json.loads(module_path.read_text(encoding="utf-8"))
+
+          repo = os.environ["REPO"]
+          ref_type = os.environ.get("REF_TYPE", "")
+          ref_name = os.environ.get("REF_NAME", "")
+          tag = ref_name if ref_type == "tag" else ""
+
+          version = str(module.get("version", "")).strip()
+          if not version:
+            raise SystemExit("module.json version is missing")
+
+          if tag:
+            normalized_tag = tag[1:] if tag.startswith("v") else tag
+            if normalized_tag != version:
+              raise SystemExit(
+                f"Tag/version mismatch: tag '{tag}' != module.json version '{version}'"
+              )
+            module["url"] = f"https://github.com/{repo}"
+            module["manifest"] = f"https://github.com/{repo}/releases/download/{tag}/module.json"
+            module["download"] = f"https://github.com/{repo}/releases/download/{tag}/sceneforge-ai.zip"
+          else:
+            module["url"] = f"https://github.com/{repo}"
+            module["manifest"] = f"https://raw.githubusercontent.com/{repo}/main/module.json"
+            module["download"] = f"https://github.com/{repo}/releases/latest/download/sceneforge-ai.zip"
+
+          Path("dist/module.json").write_text(
+            json.dumps(module, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8"
+          )
+          PY
+
+          zip -r "dist/${MODULE_ZIP_NAME}" . \
+            -x ".git/*" \
+               ".github/*" \
+               "dist/*" \
+               "node_modules/*" \
+               "*.DS_Store"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-release-assets
+          path: |
+            dist/module.json
+            dist/${{ env.MODULE_ZIP_NAME }}
+
+      - name: Publish release assets on tag push
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/module.json
+            dist/${{ env.MODULE_ZIP_NAME }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          append_body: true

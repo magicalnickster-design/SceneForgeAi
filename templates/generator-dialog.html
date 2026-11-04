@@ -14,6 +14,17 @@
   </div>
 
   <div class="form-group sceneforge-field">
+    <label for="sf-map-style" class="sceneforge-field-label">Map Style</label>
+    <select id="sf-map-style" name="mapStyle">
+      <option value="fantasy" selected>Fantasy</option>
+      <option value="scifi">Sci-Fi</option>
+    </select>
+    <p class="notes sceneforge-field-notes">
+      Changes visual direction and prompt prefix while preserving top-down battle-map perspective.
+    </p>
+  </div>
+
+  <div class="form-group sceneforge-field">
     <label for="sf-seed" class="sceneforge-field-label">Random Seed (optional)</label>
     <input
       id="sf-seed"
