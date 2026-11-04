@@ -5819,6 +5819,47 @@ function buildMapStylePrefixLines(mapStyle) {
   ];
 }
 
+const MAX_COMPILED_PROMPT_CHARS = 2600;
+
+function buildPromptFromPrioritySections(sections, maxChars = MAX_COMPILED_PROMPT_CHARS) {
+  const lines = [];
+  let totalLength = 0;
+
+  const tryAppendLine = (line, allowTruncate = false) => {
+    const normalizedLine = String(line ?? "").trim();
+    if (!normalizedLine) return true;
+    const separatorLength = lines.length > 0 ? 1 : 0;
+    const fullLineLength = normalizedLine.length + separatorLength;
+    if (totalLength + fullLineLength <= maxChars) {
+      lines.push(normalizedLine);
+      totalLength += fullLineLength;
+      return true;
+    }
+    if (!allowTruncate) return false;
+    const remainingChars = maxChars - totalLength - separatorLength;
+    // Keep truncated required lines meaningful.
+    if (remainingChars < 24) return false;
+    const truncatedLine = `${normalizedLine.slice(0, remainingChars - 1)}…`;
+    lines.push(truncatedLine);
+    totalLength += truncatedLine.length + separatorLength;
+    return false;
+  };
+
+  for (const section of sections) {
+    const sectionLines = Array.isArray(section?.lines) ? section.lines : [];
+    const required = section?.required === true;
+    for (const line of sectionLines) {
+      const appended = tryAppendLine(line, required);
+      if (!appended && !required) continue;
+      if (!appended && required) break;
+      if (totalLength >= maxChars) break;
+    }
+    if (totalLength >= maxChars) break;
+  }
+
+  return lines.join("\n");
+}
+
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const mapStylePrefixLines = buildMapStylePrefixLines(options.mapStyle);
@@ -5845,54 +5886,72 @@ function compileInkarnatePrompt(prompt, options = {}) {
   const tavernSpecificLines = (buildingViewMode === "roofs-no-interior" || !isTavernLikePrompt(sourcePrompt))
     ? []
     : TAVERN_INTERIOR_HARD_REQUIREMENTS;
-  const lines = [
-    sourcePrompt,
-    ...mapStylePrefixLines,
-    ...spatialLogicLines,
-    "TRUE TOP DOWN BATTLE MAP",
-    "HARD REQUIREMENTS: DO NOT VIOLATE PLAN-VIEW OR SPATIAL-LOGIC RULES",
-    "90 DEGREE ORTHOGRAPHIC CAMERA",
-    "BIRDS-EYE PLANIMETRIC VIEW FROM DIRECTLY OVERHEAD",
-    "EVERY BUILDING MUST READ AS A FLOORPLAN OR ROOF PLAN SHAPE ONLY",
-    "ALL WALLS AND BUILDINGS MUST BE TOP-DOWN PLAN VIEW ONLY",
-    "SHOW ONLY ROOFS OR WALL TOP CAPS, NEVER SIDE FACES",
-    "NO VISIBLE WALL SIDES, NO BUILDING FACADES",
-    "NO ELEVATION VIEW, NO HORIZON, NO ANGLED ARCHITECTURE",
-    "ALL DOORS, WINDOWS, AND WALLS MUST BE DRAWN AS TOP-DOWN SYMBOLS, NOT SIDE VIEWS",
-    "DOORS MUST APPEAR AS TOP-DOWN FRAME OPENINGS OR THIN THRESHOLD SYMBOLS ONLY",
-    "NEVER SHOW THE FULL DOOR SLAB, DOOR FACE, OR SIDE-HINGED PANEL FROM A SIDE/ELEVATION VIEW",
-    "IF A STRUCTURE APPEARS, FORCE IT INTO FLAT TOP-DOWN ROOF OR FLOOR FOOTPRINT",
-    buildingViewLine,
-    ...spatialIntegrityLines,
-    ...interiorSpecificLines,
-    ...tavernSpecificLines,
-    "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
-    "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
-    "DO NOT CREATE NONSENSICAL WALL BREAKS OR DISCONNECTED PATH SEGMENTS",
-    orientationSpec.promptLine,
-    ...scaleLines,
-    "GRIDLESS",
-    "HAND PAINTED INKARNATE STYLE",
-    "CRISP LINEWORK",
-    "SHARP CLEAN EDGES",
-    "HIGH DETAIL TEXTURES",
-    "HIGH CONTRAST COLOR SEPARATION",
-    "VIBRANT READABLE COLORS",
-    "D&D VTT MAP",
-    "NO CHARACTERS",
-    "NO TEXT ANYWHERE",
-    "NO LETTERS OR NUMBERS IN ANY ROOM OR AREA",
-    "NO ROOM LABELS, NO TILE LABELS, NO LEGENDS, NO TITLES, NO CAPTIONS",
-    "NO GLYPHS, NO RUNES, NO SIGNAGE, NO CALLOUTS, NO ANNOTATIONS",
-    "NO WATERMARKS, NO LOGOS, NO UI ELEMENTS, NO BORDER TEXT",
-    "IF ANY TEXT APPEARS, REMOVE IT COMPLETELY",
-    "NO LABELS",
-    "NO ISOMETRIC",
-    "NO PERSPECTIVE CAMERA",
-    "NO THREE-QUARTER VIEW",
-    "NO OBLIQUE CAMERA ANGLE"
-  ];
-  return lines.filter((line) => line.length > 0).join("\n");
+  return buildPromptFromPrioritySections([
+    {
+      required: true,
+      lines: [sourcePrompt]
+    },
+    {
+      required: true,
+      lines: mapStylePrefixLines
+    },
+    {
+      required: true,
+      lines: spatialLogicLines
+    },
+    {
+      required: true,
+      lines: [
+        "TRUE TOP DOWN BATTLE MAP",
+        "90 DEGREE ORTHOGRAPHIC CAMERA",
+        "BIRDS-EYE PLANIMETRIC VIEW FROM DIRECTLY OVERHEAD",
+        "ALL WALLS AND BUILDINGS MUST BE TOP-DOWN PLAN VIEW ONLY",
+        "NO ELEVATION VIEW, NO HORIZON, NO ANGLED ARCHITECTURE",
+        "ALL DOORS, WINDOWS, AND WALLS MUST BE DRAWN AS TOP-DOWN SYMBOLS, NOT SIDE VIEWS",
+        "DOORS MUST APPEAR AS TOP-DOWN FRAME OPENINGS OR THIN THRESHOLD SYMBOLS ONLY",
+        "NEVER SHOW THE FULL DOOR SLAB, DOOR FACE, OR SIDE-HINGED PANEL FROM A SIDE/ELEVATION VIEW",
+        buildingViewLine,
+        ...spatialIntegrityLines,
+        ...interiorSpecificLines,
+        ...tavernSpecificLines,
+        "PATHWAYS, STREETS, HALLWAYS, AND PASSAGES MUST FORM LOGICAL NAVIGABLE ROUTES",
+        "INTERIOR WALLS, DOORS, AND CONNECTING CORRIDORS MUST BE SPATIALLY COHERENT AND MAKE PRACTICAL SENSE",
+        orientationSpec.promptLine,
+        "GRIDLESS"
+      ]
+    },
+    {
+      required: false,
+      lines: scaleLines
+    },
+    {
+      required: false,
+      lines: [
+        "HAND PAINTED INKARNATE STYLE",
+        "CRISP LINEWORK",
+        "SHARP CLEAN EDGES",
+        "HIGH DETAIL TEXTURES",
+        "HIGH CONTRAST COLOR SEPARATION",
+        "VIBRANT READABLE COLORS",
+        "D&D VTT MAP"
+      ]
+    },
+    {
+      required: true,
+      lines: [
+        "NO CHARACTERS",
+        "NO TEXT ANYWHERE",
+        "NO LETTERS OR NUMBERS IN ANY ROOM OR AREA",
+        "NO ROOM LABELS, NO TILE LABELS, NO LEGENDS, NO TITLES, NO CAPTIONS",
+        "NO GLYPHS, NO RUNES, NO SIGNAGE, NO CALLOUTS, NO ANNOTATIONS",
+        "NO WATERMARKS, NO LOGOS, NO UI ELEMENTS, NO BORDER TEXT",
+        "NO ISOMETRIC",
+        "NO PERSPECTIVE CAMERA",
+        "NO THREE-QUARTER VIEW",
+        "NO OBLIQUE CAMERA ANGLE"
+      ]
+    }
+  ]);
 }
 
 function buildAiCompositionNotes({ text, rooms, terrainFeatures, biome, lightingMood }) {
