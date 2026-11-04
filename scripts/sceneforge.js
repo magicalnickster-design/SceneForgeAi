@@ -5821,6 +5821,79 @@ function buildMapStylePrefixLines(mapStyle) {
   ];
 }
 
+const SCIFI_ARCHETYPE_PREFIX_PROFILES = [
+  {
+    id: "hangar",
+    keywords: [/\bhangar\b/i, /\bdocking\s*bay\b/i, /\bflight\s*deck\b/i, /\blaunch\s*bay\b/i],
+    lines: [
+      "SCIFI HANGAR PROGRAM: LARGE CENTRAL LANDING ZONE WITH CLEAR TAXI/LANDING MARKINGS",
+      "PLACE SUPPORT ROOMS ON PERIMETER: CONTROL, MAINTENANCE, ARMORY/LOCKER, READY ROOM"
+    ]
+  },
+  {
+    id: "bridge-command",
+    keywords: [/\bbridge\b/i, /\bcommand\b/i, /\bcic\b/i, /\boperations?\b/i],
+    lines: [
+      "SCIFI COMMAND PROGRAM: FOCAL COMMAND/BRIDGE SPACE WITH CLEAR CONSOLE CLUSTERS",
+      "SURROUND WITH SUPPORT STATIONS (COMMS/SENSORS/NAV) IN LOGICAL ADJACENCY"
+    ]
+  },
+  {
+    id: "engineering-reactor",
+    keywords: [/\bengineering\b/i, /\bengine\s*room\b/i, /\breactor\b/i, /\bpropulsion\b/i],
+    lines: [
+      "SCIFI ENGINEERING PROGRAM: HEAVY MACHINERY CORE WITH MAINTENANCE ACCESS LANES",
+      "INCLUDE SERVICE ALCOVES, POWER CONTROL STATIONS, AND SAFETY BUFFER SPACE"
+    ]
+  },
+  {
+    id: "medical-lab",
+    keywords: [/\bmedbay\b/i, /\bmedical\b/i, /\binfirmary\b/i, /\blab(oratory)?\b/i, /\bresearch\b/i],
+    lines: [
+      "SCIFI MEDICAL/LAB PROGRAM: CLEAN CLINICAL OR RESEARCH ZONES WITH CLEAR WORK TRIANGLES",
+      "SEPARATE EXAM/OPERATING SPACES FROM STORAGE AND EQUIPMENT LOCKERS"
+    ]
+  },
+  {
+    id: "cargo-logistics",
+    keywords: [/\bcargo\b/i, /\bloading\b/i, /\bstorage\b/i, /\bwarehouse\b/i, /\bfreight\b/i],
+    lines: [
+      "SCIFI CARGO PROGRAM: STRUCTURED STORAGE BLOCKS WITH WIDE CIRCULATION LANES",
+      "INCLUDE LOGISTICS STATIONS AND SAFE CLEARANCE AROUND BULK CONTAINERS"
+    ]
+  },
+  {
+    id: "security-brig-armory",
+    keywords: [/\barmou?ry\b/i, /\bbrig\b/i, /\bprison\b/i, /\bsecurity\b/i, /\bdetention\b/i],
+    lines: [
+      "SCIFI SECURITY PROGRAM: HARDENED SECURITY ZONES WITH CONTROLLED ACCESS POINTS",
+      "SEPARATE HOLDING CELLS/LOCKERS FROM PRIMARY TRAFFIC PATHS"
+    ]
+  },
+  {
+    id: "corridor-station",
+    keywords: [/\bcorridor\b/i, /\bhallway\b/i, /\bcomms?\b/i, /\bserver\b/i, /\bstation\b/i, /\boutpost\b/i],
+    lines: [
+      "SCIFI STATION PROGRAM: CLEAR MAIN CORRIDOR SPINE WITH BRANCH ROOMS OFF CONTROLLED JUNCTIONS",
+      "KEEP CIRCULATION READABLE AND AVOID MAZE-LIKE DEAD ENDS UNLESS EXPLICITLY REQUESTED"
+    ]
+  }
+];
+
+function buildSciFiArchetypePrefixLines(sourcePrompt, mapStyle) {
+  if (String(mapStyle ?? "").trim().toLowerCase() !== "scifi") return [];
+  const promptText = String(sourcePrompt ?? "");
+  if (!promptText.trim()) return [];
+  const scored = SCIFI_ARCHETYPE_PREFIX_PROFILES.map((profile) => {
+    const score = profile.keywords.reduce((count, pattern) => (pattern.test(promptText) ? count + 1 : count), 0);
+    return { profile, score };
+  }).filter((entry) => entry.score > 0);
+  if (scored.length === 0) return [];
+  scored.sort((a, b) => b.score - a.score);
+  const selectedProfiles = scored.slice(0, 2).map((entry) => entry.profile);
+  return selectedProfiles.flatMap((profile) => profile.lines);
+}
+
 const MAX_COMPILED_PROMPT_CHARS = 2600;
 
 function buildPromptFromPrioritySections(sections, maxChars = MAX_COMPILED_PROMPT_CHARS) {
@@ -5865,6 +5938,7 @@ function buildPromptFromPrioritySections(sections, maxChars = MAX_COMPILED_PROMP
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const mapStylePrefixLines = buildMapStylePrefixLines(options.mapStyle);
+  const scifiArchetypePrefixLines = buildSciFiArchetypePrefixLines(sourcePrompt, options.mapStyle);
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
   const spatialLogicLines = buildSpatialLogicConstraintLines(sourcePrompt);
@@ -5895,7 +5969,7 @@ function compileInkarnatePrompt(prompt, options = {}) {
     },
     {
       required: true,
-      lines: mapStylePrefixLines
+      lines: [...mapStylePrefixLines, ...scifiArchetypePrefixLines]
     },
     {
       required: true,
