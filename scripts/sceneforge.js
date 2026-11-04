@@ -2536,7 +2536,7 @@ function buildGenerationConfigFromForm(form) {
     enabledAssetPacks: [],
     generationLayers: ["background-image"],
     seed,
-    moduleVersion: "1.20"
+    moduleVersion: "1.5"
   };
 
   // Store the raw form values so Back/Edit can restore exactly what user entered.
@@ -4620,7 +4620,7 @@ function buildScenePresetPayload(scene, generationData) {
   return {
     presetType: "SceneForgePreset",
     presetSchemaVersion: "1.0.0",
-    version: generationData.moduleVersion ?? "1.20",
+    version: generationData.moduleVersion ?? "1.5",
     exportedAt: new Date().toISOString(),
     sceneName: scene.name,
     generationMode: generationData.generationMode ?? "ai-image-only",
@@ -4743,7 +4743,7 @@ function validateImportedPreset(rawPreset) {
     enabledAssetPacks: Array.isArray(enabledAssetPacks) ? enabledAssetPacks.filter((v) => typeof v === "string") : [],
     generationLayers: ["background-image"],
     seed,
-    moduleVersion: "1.20"
+    moduleVersion: "1.5"
   };
 
   return {
@@ -4951,7 +4951,7 @@ async function generateSceneLayout(scene, generationData, options = {}) {
     enabledAssetPacks: [],
     generationLayers,
     seed,
-    moduleVersion: "1.20",
+    moduleVersion: "1.5",
     lastGeneratedAt: Date.now()
   });
 
