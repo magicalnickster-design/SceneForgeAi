@@ -555,6 +555,19 @@ const MAP_STYLE_LABELS = {
   fantasy: "Fantasy",
   scifi: "Sci-Fi"
 };
+const SCIFI_SUBSTYLE_LABELS = {
+  mothership: "Mothership (Industrial Horror)",
+  starfinder: "Starfinder (Heroic Space Fantasy)",
+  shadowrun: "Shadowrun (Cyberpunk Megacorp)"
+};
+const DEFAULT_SCIFI_SUBSTYLE = "mothership";
+
+function normalizeSciFiSubStyle(value) {
+  const normalized = String(value ?? DEFAULT_SCIFI_SUBSTYLE).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(SCIFI_SUBSTYLE_LABELS, normalized)
+    ? normalized
+    : DEFAULT_SCIFI_SUBSTYLE;
+}
 
 const LIGHTING_MOOD_LABELS = {
   bright: "Bright",
@@ -2379,6 +2392,22 @@ function wireAutoDetectUi(dialogHtml, initialState = null) {
 
   // Restore previous values if the dialog is reopened.
   applyGeneratorFormState(form, initialState);
+  initializeMapStyleDependentControls(form);
+}
+
+function initializeMapStyleDependentControls(form) {
+  const mapStyleSelect = form.find('[name="mapStyle"]');
+  const sciFiSubStyleField = form.find(".sceneforge-scifi-substyle-field");
+  if (!mapStyleSelect.length || !sciFiSubStyleField.length) return;
+
+  const syncSciFiSubStyleVisibility = () => {
+    const mapStyle = String(mapStyleSelect.val() ?? "fantasy").trim().toLowerCase();
+    const isSciFi = mapStyle === "scifi";
+    sciFiSubStyleField.toggle(isSciFi);
+  };
+
+  mapStyleSelect.off("change.sceneforgeMapStyle").on("change.sceneforgeMapStyle", syncSciFiSubStyleVisibility);
+  syncSciFiSubStyleVisibility();
 }
 
 /**
@@ -2389,6 +2418,7 @@ function applyGeneratorFormState(form, state) {
   if (typeof state.prompt === "string") form.find('[name="prompt"]').val(state.prompt);
   if (typeof state.seed === "string") form.find('[name="seed"]').val(state.seed);
   if (typeof state.mapStyle === "string") form.find('[name="mapStyle"]').val(state.mapStyle);
+  if (typeof state.scifiSubStyle === "string") form.find('[name="scifiSubStyle"]').val(normalizeSciFiSubStyle(state.scifiSubStyle));
   if (typeof state.mapScale === "string") form.find('[name="mapScale"]').val(state.mapScale);
   if (typeof state.imageOrientation === "string") form.find('[name="imageOrientation"]').val(state.imageOrientation);
   if (typeof state.buildingViewMode === "string") form.find('[name="buildingViewMode"]').val(state.buildingViewMode);
@@ -2447,6 +2477,8 @@ function buildGenerationConfigFromForm(form) {
   const generationMode = "ai-image-only";
   const prompt = String(form.find('[name="prompt"]').val() ?? "").trim();
   const mapStyle = String(form.find('[name="mapStyle"]').val() ?? "fantasy").trim().toLowerCase();
+  const rawSciFiSubStyle = normalizeSciFiSubStyle(form.find('[name="scifiSubStyle"]').val());
+  const scifiSubStyle = mapStyle === "scifi" ? rawSciFiSubStyle : null;
   const sceneSizeKey = String(form.find('[name="mapScale"]').val() ?? "medium").trim().toLowerCase();
   const imageOrientation = String(form.find('[name="imageOrientation"]').val() ?? "landscape").trim().toLowerCase();
   const buildingViewMode = String(form.find('[name="buildingViewMode"]').val() ?? "interior").trim().toLowerCase();
@@ -2466,6 +2498,7 @@ function buildGenerationConfigFromForm(form) {
   const mapCoverageMeters = getMapCoverageMeters(sceneSizeKey);
   const compiledImagePrompt = compileInkarnatePrompt(prompt, {
     mapStyle,
+    scifiSubStyle,
     imageOrientation,
     sceneSizeKey,
     mapCoverageMeters,
@@ -2476,6 +2509,7 @@ function buildGenerationConfigFromForm(form) {
     generationMode,
     prompt,
     mapStyle,
+    scifiSubStyle,
     sceneSizeKey,
     imageOrientation,
     buildingViewMode,
@@ -2509,6 +2543,7 @@ function buildGenerationConfigFromForm(form) {
     prompt,
     seed,
     mapStyle,
+    scifiSubStyle: scifiSubStyle ?? DEFAULT_SCIFI_SUBSTYLE,
     mapScale: sceneSizeKey,
     imageOrientation,
     buildingViewMode
@@ -2586,6 +2621,7 @@ function buildGenerationPreviewData(config) {
     generationMode: generationData.generationMode ?? "ai-image-only",
     finalTheme: generationData.theme,
     mapStyle: generationData.mapStyle ?? "fantasy",
+    scifiSubStyle: generationData.scifiSubStyle ?? null,
     finalSize: generationData.sceneSizeKey,
     finalSeed: generationData.seed,
     imageOrientation: generationData.imageOrientation ?? "landscape",
@@ -2698,6 +2734,7 @@ async function openGenerationPreviewDialog(config, previewData) {
   <p><strong>Generation Mode:</strong> AI Planner Mode</p>
   <p><strong>Final Theme:</strong> ${foundry.utils.escapeHTML(formatThemeLabel(previewData.finalTheme))}</p>
   <p><strong>Map Style:</strong> ${foundry.utils.escapeHTML(MAP_STYLE_LABELS[previewData.mapStyle] ?? MAP_STYLE_LABELS.fantasy)}</p>
+  ${previewData.mapStyle === "scifi" ? `<p><strong>Sci-Fi Art Style:</strong> ${foundry.utils.escapeHTML(SCIFI_SUBSTYLE_LABELS[previewData.scifiSubStyle] ?? SCIFI_SUBSTYLE_LABELS[DEFAULT_SCIFI_SUBSTYLE])}</p>` : ""}
   <p><strong>Final Size:</strong> ${foundry.utils.escapeHTML(formatSceneSizeLabel(previewData.finalSize))}</p>
   <p><strong>Final Seed:</strong> ${foundry.utils.escapeHTML(previewData.finalSeed)}</p>
   <p><strong>Lighting Mood:</strong> ${foundry.utils.escapeHTML(LIGHTING_MOOD_LABELS[previewData.lightingMood] ?? "Dim")}</p>
@@ -3308,6 +3345,8 @@ function compileSceneImageEditPrompt(scene, editPrompt) {
   const normalizedPrompt = String(editPrompt ?? "").trim();
   if (!normalizedPrompt) return "";
   const generationData = scene?.getFlag?.(MODULE_ID, FLAG_GENERATION_KEY) ?? {};
+  const mapStyle = String(generationData?.mapStyle ?? "fantasy").trim().toLowerCase() || "fantasy";
+  const scifiSubStyle = normalizeSciFiSubStyle(generationData?.scifiSubStyle);
   const sceneSizeKey = String(generationData?.sceneSizeKey ?? "medium").trim().toLowerCase() || "medium";
   const sceneWidth = Number(scene?.width ?? 0);
   const sceneHeight = Number(scene?.height ?? 0);
@@ -3318,6 +3357,8 @@ function compileSceneImageEditPrompt(scene, editPrompt) {
   const mapCoverageMeters = Number(generationData?.mapCoverageMeters ?? getMapCoverageMeters(sceneSizeKey));
   const buildingViewMode = String(generationData?.buildingViewMode ?? "interior").trim().toLowerCase() || "interior";
   const compiledBasePrompt = compileInkarnatePrompt(normalizedPrompt, {
+    mapStyle,
+    scifiSubStyle,
     imageOrientation,
     sceneSizeKey,
     mapCoverageMeters,
@@ -4654,6 +4695,8 @@ function validateImportedPreset(rawPreset) {
   const sourceVersion = String(rawPreset.version ?? rawPreset.generationData?.moduleVersion ?? "unknown");
   const generationMode = String(rawPreset.generationMode ?? rawPreset.generationData?.generationMode ?? "ai-image-only");
   const prompt = String(rawPreset.prompt ?? rawPreset.generationData?.prompt ?? "").trim();
+  const mapStyle = String(rawPreset.mapStyle ?? rawPreset.generationData?.mapStyle ?? "fantasy").trim().toLowerCase() || "fantasy";
+  const scifiSubStyle = normalizeSciFiSubStyle(rawPreset.scifiSubStyle ?? rawPreset.generationData?.scifiSubStyle);
   const theme = "ai-map";
   const sceneSizeKey = "medium";
   const seed = String(rawPreset.seed ?? rawPreset.generationData?.seed ?? "").trim();
@@ -4663,7 +4706,7 @@ function validateImportedPreset(rawPreset) {
   if (!seed) return { ok: false, error: "Missing seed." };
   const compiledImagePrompt = rawPreset.compiledImagePrompt
     ?? rawPreset.generationData?.compiledImagePrompt
-    ?? compileInkarnatePrompt(prompt);
+    ?? compileInkarnatePrompt(prompt, { mapStyle, scifiSubStyle });
   const detected = null;
   const aiPlan = null;
   const layoutGraph = null;
@@ -4684,6 +4727,8 @@ function validateImportedPreset(rawPreset) {
   const generationData = {
     generationMode,
     prompt,
+    mapStyle,
+    scifiSubStyle,
     sceneSizeKey,
     theme,
     lightingMood,
@@ -5821,6 +5866,36 @@ function buildMapStylePrefixLines(mapStyle) {
   ];
 }
 
+function buildSciFiSubStylePrefixLines(mapStyle, scifiSubStyle) {
+  if (String(mapStyle ?? "").trim().toLowerCase() !== "scifi") return [];
+  const normalizedSubStyle = normalizeSciFiSubStyle(scifiSubStyle);
+  if (normalizedSubStyle === "mothership") {
+    return [
+      "MOTHERSHIP-INSPIRED SCI-FI STYLE: GRITTY INDUSTRIAL RETRO-FUTURISM",
+      "WORKING-CLASS STARSHIP/STATION INTERIORS WITH EXPOSED UTILITIES, MAINTENANCE PANELS, AND HEAVY FUNCTIONAL HARDWARE",
+      "DESATURATED PALETTE WITH DIRTY METALS, HAZARD STRIPES, OIL STAINS, AND STRESSED MATERIALS",
+      "CLAUSTROPHOBIC FUNCTION-FIRST LAYOUTS; NO SLEEK LUXURY FUTURISM, NO BRIGHT HEROIC SPACE OPERA FINISHES"
+    ];
+  }
+  if (normalizedSubStyle === "starfinder") {
+    return [
+      "STARFINDER-INSPIRED SCI-FI STYLE: HEROIC, COLORFUL SPACE-OPERA VISUAL LANGUAGE",
+      "CLEAN HIGH-TECH INTERIORS WITH CURVED ARCHITECTURE, MODULAR PANELS, AND ADVANCED ALIEN-HUMAN DESIGN BLENDS",
+      "SATURATED ACCENT LIGHTING (CYAN, MAGENTA, VIOLET, AMBER) OVER DARK METALLIC BASE MATERIALS",
+      "VIBRANT READABLE ADVENTURE-MAP AESTHETIC WITH POLISHED FUTURISTIC SET PIECES"
+    ];
+  }
+  if (normalizedSubStyle === "shadowrun") {
+    return [
+      "SHADOWRUN-INSPIRED SCI-FI STYLE: CYBERPUNK MEGACORP SPRAWL AESTHETIC",
+      "DENSE URBAN/INDOOR TACTICAL SPACES WITH CORPORATE SECURITY CHECKPOINTS, SERVICE ALLEYS, AND NEON-LIT INTERIORS",
+      "RAIN-SLICK SURFACES, CONCRETE AND STEEL TEXTURES, BLACK GLASS, INDUSTRIAL EQUIPMENT, AND PRACTICAL COVER OBJECTS",
+      "HIGH-CONTRAST NOIR LIGHTING WITH NEON COLOR ACCENTS; MAINTAIN STRICT TOP-DOWN TACTICAL READABILITY"
+    ];
+  }
+  return [];
+}
+
 const SCIFI_ARCHETYPE_PREFIX_PROFILES = [
   {
     id: "hangar",
@@ -5938,6 +6013,7 @@ function buildPromptFromPrioritySections(sections, maxChars = MAX_COMPILED_PROMP
 function compileInkarnatePrompt(prompt, options = {}) {
   const sourcePrompt = String(prompt ?? "").trim();
   const mapStylePrefixLines = buildMapStylePrefixLines(options.mapStyle);
+  const scifiSubStylePrefixLines = buildSciFiSubStylePrefixLines(options.mapStyle, options.scifiSubStyle);
   const scifiArchetypePrefixLines = buildSciFiArchetypePrefixLines(sourcePrompt, options.mapStyle);
   const orientationSpec = getImageOrientationSpec(options.imageOrientation);
   const scaleLines = formatMapScalePromptInstruction(options.sceneSizeKey, options.mapCoverageMeters);
@@ -5969,7 +6045,7 @@ function compileInkarnatePrompt(prompt, options = {}) {
     },
     {
       required: true,
-      lines: [...mapStylePrefixLines, ...scifiArchetypePrefixLines]
+      lines: [...mapStylePrefixLines, ...scifiSubStylePrefixLines, ...scifiArchetypePrefixLines]
     },
     {
       required: true,

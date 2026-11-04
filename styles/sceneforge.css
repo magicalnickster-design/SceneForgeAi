@@ -193,6 +193,10 @@
   padding-top: 12px;
 }
 
+.sceneforge-generator-dialog .sceneforge-scifi-substyle-field {
+  display: none;
+}
+
 .sceneforge-generator-dialog .sceneforge-field-label {
   display: block;
   margin: 0 0 7px;
